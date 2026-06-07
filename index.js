@@ -9,7 +9,8 @@ import chalk from 'chalk'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ENV_FILE = path.join(__dirname, '.env')
-const DATA_FILE = process.env.DATA_FILE ? path.resolve(process.env.DATA_FILE) : path.join(__dirname, 'data.json')
+const DATA_FILE_DIR = process.env.DATA_FILE_DIR || __dirname
+const DATA_FILE = path.join(DATA_FILE_DIR, 'data.json')
 
 function loadEnv() {
   if (!fs.existsSync(ENV_FILE)) return
