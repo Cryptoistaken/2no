@@ -794,7 +794,7 @@ async function resumeSessions() {
       let lastError
       for (let attempt = 1; attempt <= 3; attempt++) {
         if (attempt > 1) {
-          const delay = attempt * 10000
+          const delay = attempt * 5000
           log.info(`retry ${attempt}/3 for ${chatId} in ${delay}ms`, chatId)
           await new Promise(r => setTimeout(r, delay))
         }
