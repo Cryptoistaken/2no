@@ -577,21 +577,28 @@ async function startPolling(chatId, session, page) {
         const body = m.body || m.text || 'empty'
         const time = m.created_at ? new Date(m.created_at).toLocaleString() : ''
         const num = (session.numbers || []).find(n => n.number_id === m.number_id)
-        const numTag = num ? `+48 ${num.number}` : ''
+        const numTag = num ? `<code>+48 ${num.number}</code> 🇵🇱` : ''
 
-        log.info(`SMS ${numTag} from ${sender}: ${body.slice(0, 80)}`, chatId)
+        log.info(`SMS +48 ${num ? num.number : '?'} from ${sender}: ${body.slice(0, 80)}`, chatId)
 
         const st = userStats(chatId)
         st.messagesReceived = (st.messagesReceived || 0) + 1
         if (!st.messages) st.messages = []
-        st.messages.push({ from: sender, body, time, number: numTag, receivedAt: new Date().toISOString() })
+        st.messages.push({ from: sender, body, time, number: num ? `+48 ${num.number}` : '', receivedAt: new Date().toISOString() })
         saveData()
 
-        if (typeof bot !== 'undefined') bot.telegram.sendMessage(chatId,
-          `${numTag ? numTag + ' ' : ''}From: ${sender}\nMessage: ${body}${time ? `\nTime: ${time}` : ''}`
-        ).catch((e) => {
-          log.error(`telegram send failed: ${e.message}`, chatId)
-        })
+        if (bot) {
+          const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          const fmtBody = esc(body).replace(/\b(\d{4,8})\b/g, '<code>$1</code>')
+          const lines = []
+          if (numTag) lines.push(numTag)
+          lines.push(`<b>From:</b> ${esc(sender)}`)
+          lines.push(`<b>Message:</b> ${fmtBody}`)
+          if (time) lines.push(`<b>Time:</b> ${time}`)
+          bot.telegram.sendMessage(chatId, lines.join('\n'), { parse_mode: 'HTML' }).catch((e) => {
+            log.error(`telegram send failed: ${e.message}`, chatId)
+          })
+        }
       }
     } catch (e) {
       log.error(`polling error: ${e.message}`, chatId)
@@ -692,8 +699,9 @@ async function processGetNumber(ctx, count) {
   })()
 }
 
+let bot
 if (!isTest) {
-const bot = new Telegraf(TG_TOKEN)
+bot = new Telegraf(TG_TOKEN)
 
 bot.use((ctx, next) => {
   const chatId = ctx.chat?.id
