@@ -2,3 +2,6 @@ node_modules
 .git
 .gitignore
 README.md
+.env
+data.json
+data/
