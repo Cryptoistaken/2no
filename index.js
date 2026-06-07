@@ -780,7 +780,7 @@ async function resumeSessions() {
       try {
         const proxy = getProxy()
         const proxyInfo = proxy ? `${proxy.server}` : 'none'
-        log.info(`resuming session for ${chatId}`, chatId)
+        log.info(`resuming session ${chatId}, ${s.numbers.length} number(s): ${s.numbers.map(n => n.number).join(', ')}`, chatId)
         const opts = proxy ? { headless: false, proxy } : { headless: false }
         const browser = await chromium.launch(opts)
         const page = await browser.newPage()
