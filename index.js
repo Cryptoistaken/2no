@@ -659,10 +659,10 @@ async function startPolling(chatId, session, page) {
     stopPolling(chatId)
     const msgId = monitorMessages[chatId]
     if (msgId) {
-      const startBtn = [[{ text: 'Start Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
+      const resumeBtn = [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
       bot.telegram.editMessageText(chatId, msgId, undefined,
-        '<b>Monitoring auto-stopped (2h limit)</b>\n\nClick Start to resume monitoring your numbers.',
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: startBtn } }
+        '<b>Monitoring auto-stopped (2h limit)</b>\n\nClick Resume to continue monitoring.',
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: resumeBtn } }
       ).catch(() => {})
     }
     printState()
@@ -910,10 +910,10 @@ bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
   await stopPolling(chatId)
   if (sessions[chatId]) sessions[chatId].numbers = []
   saveData()
-  const startBtn = [[{ text: 'Start Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
+  const resumeBtn = [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
   await ctx.telegram.editMessageText(chatId, msgId, undefined,
-    '<b>Monitoring stopped</b>\n\nClick Start to resume monitoring your numbers.',
-    { parse_mode: 'HTML', reply_markup: { inline_keyboard: startBtn } }
+    '<b>Monitoring stopped</b>\n\nClick Resume to continue monitoring.',
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: resumeBtn } }
   ).catch(() => {})
   printState()
 })
@@ -943,13 +943,17 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery()
   const session = sessions[chatId]
   if (!session || !session.numbers.length) {
-    return ctx.editMessageText('No numbers to monitor. Use /get to get numbers first.').catch(() => {})
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      'No numbers to monitor.'
+    ).catch(() => {})
+    return ctx.reply('Choose an option:', mainMenu())
   }
   const oldest = session.numbers.reduce((min, n) => Math.min(min, n.created_at || Infinity), Infinity) * 1000
   if (oldest && Date.now() - oldest > 86400000) {
-    return ctx.telegram.editMessageText(chatId, msgId, undefined,
-      'Numbers have expired (24h limit). Use /get to get new numbers.'
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      'Numbers expired (24h limit). Create new numbers.'
     ).catch(() => {})
+    return ctx.reply('Choose an option:', mainMenu())
   }
   try {
     const proxy = getProxy()
