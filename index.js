@@ -625,12 +625,14 @@ async function startPolling(chatId, session, page) {
 
         if (bot) {
           const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          const fmtBody = esc(body).replace(/\b(\d{4,8})\b/g, '<code>$1</code>')
+          const bodyEsc = esc(body)
+          const codeMatch = body.match(/\b(\d{4,8})\b/)
           const lines = []
           if (numTag) lines.push(numTag)
           lines.push(`<b>From:</b> ${esc(sender)}`)
-          lines.push(`<b>Message:</b> ${fmtBody}`)
+          if (codeMatch) lines.push(`<b>Code:</b> <code>${codeMatch[1]}</code>`)
           if (time) lines.push(`<b>Time:</b> ${time}`)
+          lines.push(`<b>Message:</b> ${bodyEsc}`)
           bot.telegram.sendMessage(chatId, lines.join('\n'), { parse_mode: 'HTML' }).catch((e) => {
             log.error(`telegram send failed: ${e.message}`, chatId)
           })
