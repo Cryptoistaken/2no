@@ -503,6 +503,42 @@ async function pollApi(page, token, body) {
   }
 }
 
+function detectSender(body) {
+  const services = [
+    [['X', 'Twitter'], /\b(?:x|twitter)\b/i],
+    [['Telegram'], /\btelegram\b/i],
+    [['ChatGPT'], /\b(?:chatgpt|chat gpt|openai|open ai)\b/i],
+    [['Claude', 'Anthropic'], /\b(?:claude|anthropic)\b/i],
+    [['IMO'], /\bimo\b/i],
+    [['Facebook', 'Meta'], /\b(?:facebook|meta)\b/i],
+    [['Instagram'], /\b(?:instagram|insta)\b/i],
+    [['WhatsApp'], /\b(?:whatsapp|wa)\b/i],
+    [['Snapchat'], /\b(?:snapchat|snap)\b/i],
+    [['TikTok'], /\btiktok\b/i],
+    [['Discord'], /\bdiscord\b/i],
+    [['Signal'], /\bsignal\b/i],
+    [['LinkedIn'], /\blinkedin\b/i],
+    [['Google'], /\b(?:google|gmail)\b/i],
+    [['Microsoft', 'Outlook'], /\b(?:microsoft|outlook)\b/i],
+    [['Apple', 'iMessage'], /\b(?:apple|imessage)\b/i],
+    [['Amazon'], /\bamazon\b/i],
+    [['Netflix'], /\bnetflix\b/i],
+    [['Spotify'], /\bspotify\b/i],
+    [['Uber'], /\buber\b/i],
+    [['PayPal'], /\bpaypal\b/i],
+    [['Binance'], /\bbinance\b/i],
+    [['Coinbase'], /\bcoinbase\b/i],
+    [['Reddit'], /\breddit\b/i],
+    [['Twitch'], /\btwitch\b/i],
+    [['Yahoo'], /\byahoo\b/i],
+    [['Pinterest'], /\bpinterest\b/i],
+  ]
+  for (const [names, regex] of services) {
+    if (regex.test(body)) return names[0]
+  }
+  return 'unknown'
+}
+
 async function startPolling(chatId, session, page) {
   await stopPolling(chatId)
   seenMessages[chatId] = new Set()
@@ -573,8 +609,8 @@ async function startPolling(chatId, session, page) {
         if (seenMessages[chatId] && seenMessages[chatId].has(key)) continue
         seenMessages[chatId].add(key)
 
-        const sender = m.from_number || m.from || 'unknown'
         const body = m.body || m.text || 'empty'
+        const sender = m.from_number || m.from || detectSender(body)
         const time = m.created_at ? new Date(m.created_at).toLocaleString() : ''
         const num = (session.numbers || []).find(n => n.number_id === m.number_id)
         const numTag = num ? `<code>+48 ${num.number}</code> 🇵🇱` : ''
