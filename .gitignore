@@ -3,3 +3,4 @@ package-lock.json
 .playwright-mcp
 data.json
 logs/
+.env
