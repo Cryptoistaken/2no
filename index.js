@@ -1058,13 +1058,52 @@ bot.action('settings_status', async (ctx) => {
   await ctx.answerCbQuery()
   const st = userStats(chatId)
   const nums = (st.numbers || []).map(n => `+48 ${n.number}`).join(', ') || 'none'
+  const s = data.stats || {}
   const lines = [
-    `Captcha solved: ${st.captchaSolved || 0}`,
-    `Numbers generated: ${st.numbersGenerated || 0}`,
-    `Messages received: ${st.messagesReceived || 0}`,
-    `Numbers: ${nums}`,
+    `Captcha solved: ${s.captchaSolved || 0}`,
+    `Numbers generated: ${s.numbersGenerated || 0}`,
+    `Messages received: ${s.messagesReceived || 0}`,
+    `Your numbers: ${nums}`,
   ]
-  await ctx.editMessageText(lines.join('\n'), settingsMenu())
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback('Reset Status', 'status_reset')],
+    [Markup.button.callback('Back', 'settings')],
+  ])
+  await ctx.editMessageText(lines.join('\n'), kb)
+})
+
+bot.action('status_reset', async (ctx) => {
+  const chatId = ctx.chat.id
+  await ctx.answerCbQuery()
+  const confirm = Markup.inlineKeyboard([
+    [Markup.button.callback('Yes, reset', 'status_reset_yes'), Markup.button.callback('No', 'status_reset_no')],
+  ])
+  await ctx.editMessageText('Reset all stats? This cannot be undone.', confirm)
+})
+
+bot.action('status_reset_no', async (ctx) => {
+  const chatId = ctx.chat.id
+  await ctx.answerCbQuery()
+  return ctx.telegram.editMessageText(chatId, ctx.callbackQuery.message.message_id, undefined, 'Cancelled.', settingsMenu()).catch(() => {})
+})
+
+bot.action('status_reset_yes', async (ctx) => {
+  const chatId = ctx.chat.id
+  await ctx.answerCbQuery('Stats reset')
+  data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+  for (const u of Object.values(data.users)) {
+    u.captchaSolved = 0
+    u.numbersGenerated = 0
+    u.messagesReceived = 0
+    u.numbers = []
+    u.messages = []
+    u.emails = []
+  }
+  saveData()
+  log.success('stats reset', chatId)
+  await ctx.telegram.editMessageText(chatId, ctx.callbackQuery.message.message_id, undefined,
+    'Stats reset.', settingsMenu()
+  ).catch(() => {})
 })
 
 bot.action('settings_count', async (ctx) => {
