@@ -1,9 +1,13 @@
 process.noDeprecation = true
 
-const { Telegraf, Markup } = require('telegraf')
-const { chromium } = require('playwright')
-const fs = require('fs')
-const path = require('path')
+import { Telegraf, Markup } from 'telegraf'
+import { chromium } from 'playwright'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import chalk from 'chalk'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const API = 'https://2no.pl'
 const KILOMAIL_API = 'https://kilomail.vercel.app/api'
@@ -45,13 +49,11 @@ function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
 }
 
-function now() {
-  return new Date().toISOString().slice(0, 19).replace('T', ' ')
-}
-
-function log(chatId, msg) {
-  const tag = chatId ? `[${chatId}]` : '[BOT]'
-  console.log(`${now()} ${tag} ${msg}`)
+const log = {
+  info: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
+  success: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
+  error: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
+  warning: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
 }
 
 async function solveTurnstile(sitekey, pageurl) {
@@ -108,7 +110,6 @@ async function launchBrowser() {
   return { browser, page }
 }
 
-// Captcha solver with background pre-solving queue
 function createCaptchaSolver(getPageUrl) {
   const queue = []
   let solving = false
@@ -146,19 +147,19 @@ function createCaptchaSolver(getPageUrl) {
 async function buyNumbers(page, token, count, solver, logTag) {
   const bought = []
   for (let i = 0; i < count; i++) {
-    log(logTag, `Buying number ${i + 1}/${count}...`)
+    log.info(`buying number ${i + 1}/${count}`, logTag)
 
     const avail = await browserEvalAuth(page, token, { id: 310 })
     if (!avail.result || !avail.result.length) {
-      log(logTag, `No numbers available for purchase ${i + 1}, stopping`)
+      log.warning(`no numbers available for purchase ${i + 1}, stopping`, logTag)
       break
     }
     const toBuy = avail.result[0]
-    log(logTag, `Available: ${toBuy.number} (id:${toBuy.id})`)
+    log.info(`available: ${toBuy.number} id ${toBuy.id}`, logTag)
 
-    log(logTag, 'Waiting for captcha token...')
+    log.info('waiting for captcha token', logTag)
     const captchaToken = await solver.queueCaptcha()
-    log(logTag, 'Captcha ready, buying...')
+    log.info('captcha ready, buying', logTag)
 
     const buyRes = await browserEvalAuth(page, token, {
       id: 301,
@@ -171,13 +172,12 @@ async function buyNumbers(page, token, count, solver, logTag) {
       },
     })
     if (!buyRes.success) {
-      log(logTag, `Buy ${i + 1} failed: ${JSON.stringify(buyRes)}`)
+      log.error(`buy ${i + 1} failed: ${JSON.stringify(buyRes)}`, logTag)
       break
     }
-    log(logTag, `Number ${i + 1} purchased: ${toBuy.number}`)
+    log.success(`number ${i + 1} purchased: ${toBuy.number}`, logTag)
     bought.push({ number: toBuy.number, number_id: toBuy.id })
 
-    // Queue next captcha in background while we process this purchase
     if (i + 1 < count) {
       solver.queueCaptcha()
     }
@@ -189,28 +189,26 @@ async function registerAndGetNumbers(count, logTag) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const email = `${rand(8)}@kilolabs.space`
     const password = DEFAULT_PASSWORD
-    log(logTag, `Registration attempt ${attempt + 1} with email ${email}`)
+    log.info(`registration attempt ${attempt + 1} with email ${email}`, logTag)
     const { browser, page } = await launchBrowser()
 
     const closeBrowser = () => { try { browser.close() } catch {} }
 
-    // Create captcha solver and pre-queue first captcha immediately
     const solver = createCaptchaSolver(() => page.url())
     solver.queueCaptcha()
 
     const reg = await browserEval(page, { id: 103, query: { email, password } })
     if (!reg.success) {
-      log(logTag, `Registration failed for ${email}: ${JSON.stringify(reg)}`)
+      log.error(`registration failed for ${email}: ${JSON.stringify(reg)}`, logTag)
       closeBrowser()
       if (reg.error === 'EmailExists') continue
       throw new Error(`register failed: ${JSON.stringify(reg)}`)
     }
-    log(logTag, `Account created: ${email}`)
+    log.success(`account created: ${email}`, logTag)
 
-    // Queue second captcha while we wait for email
     solver.queueCaptcha()
 
-    log(logTag, 'Waiting for verification email...')
+    log.info('waiting for verification email', logTag)
     let msg = null
     const deadline = Date.now() + 90000
     while (Date.now() < deadline) {
@@ -218,26 +216,26 @@ async function registerAndGetNumbers(count, logTag) {
       if (Array.isArray(inbox) && inbox.length) { msg = inbox[0]; break }
       await sleep(2000)
     }
-    if (!msg) { log(logTag, 'Verification email not received'); closeBrowser(); continue }
-    log(logTag, `Verification email arrived: ${msg.subject}`)
+    if (!msg) { log.warning('verification email not received', logTag); closeBrowser(); continue }
+    log.success(`verification email arrived: ${msg.subject}`, logTag)
 
     const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
     const html = (body && body.html) || ''
     const m = html.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
     const verifyLink = m ? m[0].replace(/&amp;/g, '&') : null
-    if (!verifyLink) { log(logTag, 'No verify link in email'); closeBrowser(); continue }
-    log(logTag, 'Clicking verify link...')
+    if (!verifyLink) { log.warning('no verify link in email', logTag); closeBrowser(); continue }
+    log.info('clicking verify link', logTag)
 
     await page.goto(verifyLink)
     await page.waitForSelector('button:has-text("Go to login page")', { timeout: 20000 })
     await page.locator('button:has-text("Go to login page")').click()
     await page.waitForTimeout(5000)
 
-    log(logTag, 'Getting auth token...')
+    log.info('getting auth token', logTag)
     const loginRes = await browserEval(page, { id: 101, query: { email, password } })
     const token = (loginRes && loginRes.token) || ''
-    if (!token) { log(logTag, 'Failed to get auth token after registration'); closeBrowser(); continue }
-    log(logTag, 'Auth token obtained')
+    if (!token) { log.error('failed to get auth token after registration', logTag); closeBrowser(); continue }
+    log.success('auth token obtained', logTag)
 
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
     const bought = await buyNumbers(page, token, maxBuy, solver, logTag)
@@ -251,7 +249,7 @@ async function registerAndGetNumbers(count, logTag) {
 }
 
 async function loginAndGetNumbers(session, count, logTag) {
-  log(logTag, 'Logging into existing account...')
+  log.info('logging into existing account', logTag)
   const { browser, page } = await launchBrowser()
 
   const solver = createCaptchaSolver(() => page.url())
@@ -259,25 +257,23 @@ async function loginAndGetNumbers(session, count, logTag) {
   const loginRes = await browserEval(page, { id: 101, query: { email: session.email, password: session.password } })
   const token = (loginRes && loginRes.token) || ''
   if (!token) { await browser.close(); throw new Error('login failed: no token returned') }
-  log(logTag, 'Login successful')
+  log.success('login successful', logTag)
 
-  // Check existing numbers
   const myNums = await browserEvalAuth(page, token, { id: 311 })
   const existing = myNums.result || []
-  log(logTag, `Existing numbers: ${existing.length}`)
+  log.info(`existing numbers: ${existing.length}`, logTag)
 
   const needCount = Math.max(0, Math.min(count, MAX_NUMBERS_PER_ACCOUNT) - existing.length)
 
   if (needCount === 0) {
-    log(logTag, `Already have ${existing.length} numbers, using existing`)
+    log.info(`already have ${existing.length} numbers, using existing`, logTag)
     const n = existing[0]
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     return { token, numbers: existing.map(e => ({ number: e.number, number_id: e.number_id })), browser, page }
   }
 
-  log(logTag, `Need to buy ${needCount} more number(s)`)
+  log.info(`need to buy ${needCount} more numbers`, logTag)
 
-  // Pre-queue captcha before buying
   solver.queueCaptcha()
 
   const bought = await buyNumbers(page, token, needCount, solver, logTag)
@@ -329,7 +325,7 @@ async function startPolling(chatId, session, page) {
   seenMessages[chatId] = new Set()
   pollBrowsers[chatId] = { browser: page.context().browser(), page }
 
-  log(chatId, `Started SMS polling for +48 ${session.numbers.map(n => n.number).join(', ')}`)
+  log.info(`started SMS polling for +48 ${session.numbers.map(n => n.number).join(', ')}`, chatId)
 
   let pollCount = 0
   pollTimers[chatId] = setInterval(async () => {
@@ -341,7 +337,7 @@ async function startPolling(chatId, session, page) {
       })
 
       if (msgs.error === 1003 && msgs.code === 401) {
-        log(chatId, 'Token expired, attempting re-login...')
+        log.warning('token expired, attempting re-login', chatId)
         if (reAuthLocks[chatId]) { return }
         reAuthLocks[chatId] = true
         try {
@@ -373,9 +369,9 @@ async function startPolling(chatId, session, page) {
           if (!newToken) throw new Error('re-login failed')
           session.token = newToken
           sessions[chatId] = session
-          log(chatId, 'Token refreshed')
+          log.success('token refreshed', chatId)
         } catch (e) {
-          log(chatId, `Re-login failed: ${e.message}`)
+          log.error(`re-login failed: ${e.message}`, chatId)
         } finally {
           delete reAuthLocks[chatId]
         }
@@ -386,7 +382,7 @@ async function startPolling(chatId, session, page) {
       const forNumbers = (msgs.result || []).filter(m => numberIds.includes(m.number_id))
 
       if (!forNumbers.length && pollCount % 6 === 0) {
-        log(chatId, `Poll OK — ${(msgs.result || []).length} total msgs. Listening...`)
+        log.info(`poll OK, ${(msgs.result || []).length} total messages. listening`, chatId)
       }
 
       for (const m of forNumbers) {
@@ -395,20 +391,20 @@ async function startPolling(chatId, session, page) {
         seenMessages[chatId].add(key)
 
         const sender = m.from_number || m.from || 'unknown'
-        const body = m.body || m.text || '(empty)'
+        const body = m.body || m.text || 'empty'
         const time = m.created_at ? new Date(m.created_at).toLocaleString() : ''
         const num = (session.numbers || []).find(n => n.number_id === m.number_id)
-        const numTag = num ? `[+48 ${num.number}]` : ''
+        const numTag = num ? `+48 ${num.number}` : ''
 
-        log(chatId, `SMS${numTag} from ${sender}: ${body.slice(0, 80)}`)
+        log.info(`SMS ${numTag} from ${sender}: ${body.slice(0, 80)}`, chatId)
         if (typeof bot !== 'undefined') bot.telegram.sendMessage(chatId,
-          `${numTag} From: ${sender}\nMessage: ${body}${time ? `\nTime: ${time}` : ''}`
+          `${numTag ? numTag + ' ' : ''}From: ${sender}\nMessage: ${body}${time ? `\nTime: ${time}` : ''}`
         ).catch((e) => {
-          log(chatId, `Telegram send failed: ${e.message}`)
+          log.error(`telegram send failed: ${e.message}`, chatId)
         })
       }
     } catch (e) {
-      log(chatId, `Polling error: ${e.message}`)
+      log.error(`polling error: ${e.message}`, chatId)
     }
   }, 5000)
 }
@@ -427,21 +423,21 @@ function setUserDefaultNumbers(chatId, count) {
 async function processGetNumber(ctx, count) {
   const chatId = ctx.chat.id
   if (processing[chatId]) {
-    await ctx.answerCbQuery('Already processing your request...')
+    await ctx.answerCbQuery('Already processing your request')
     return
   }
   processing[chatId] = true
   await ctx.answerCbQuery()
-  const msg = await ctx.reply(`Getting ${count} number(s)... this may take a minute.`)
-  log(chatId, `User requested ${count} number(s)`)
+  const msg = await ctx.reply(`Getting ${count} numbers, this may take a minute`)
+  log.info(`user requested ${count} numbers`, chatId)
 
   try {
     let session = sessions[chatId]
     let pollPage
 
     if (!session) {
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Creating account...')
-      log(chatId, 'No existing session, starting registration')
+      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Creating account')
+      log.info('no existing session, starting registration', chatId)
       const result = await registerAndGetNumbers(count, chatId)
       session = {
         email: result.email,
@@ -452,30 +448,30 @@ async function processGetNumber(ctx, count) {
       }
       pollPage = result.page
       sessions[chatId] = session
-      log(chatId, `Account created, numbers: ${result.numbers.length}`)
+      log.success(`account created, numbers: ${result.numbers.length}`, chatId)
     } else {
       session.chatId = chatId
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Logging in...')
-      log(chatId, 'Existing session found, logging in')
+      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Logging in')
+      log.info('existing session found, logging in', chatId)
       session.email = session.email || session._email
       const result = await loginAndGetNumbers(session, count, chatId)
       session.token = result.token
       session.numbers = result.numbers
       pollPage = result.page
       sessions[chatId] = session
-      log(chatId, `Logged in, numbers: ${result.numbers.length}`)
+      log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
     }
 
     await stopPolling(chatId)
 
     const numList = session.numbers.map(n => `+48 ${n.number}`).join('\n')
     await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
-      `Your numbers (${session.numbers.length}):\n${numList}\n\nMonitoring for incoming SMS...`
+      `Your numbers ${session.numbers.length}:\n${numList}\n\nMonitoring for incoming SMS`
     )
 
     await startPolling(chatId, session, pollPage)
   } catch (e) {
-    log(chatId, `Error: ${e.message}`)
+    log.error(`error: ${e.message}`, chatId)
     await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
   } finally {
     delete processing[chatId]
@@ -488,7 +484,7 @@ const bot = new Telegraf(TG_TOKEN)
 bot.use((ctx, next) => {
   const chatId = ctx.chat?.id
   if (chatId && !AUTHORIZED_USERS.has(chatId)) {
-    log(chatId, 'Unauthorized access attempt')
+    log.error('unauthorized access attempt', chatId)
     return ctx.reply('You are not authorized to use this bot.')
   }
   return next()
@@ -496,10 +492,10 @@ bot.use((ctx, next) => {
 
 bot.start((ctx) => {
   const chatId = ctx.chat.id
-  log(chatId, 'Bot started by user')
+  log.info('bot started by user', chatId)
   const def = getUserDefaultNumbers(chatId)
   return ctx.reply(
-    `How many numbers do you need? (Default: ${def})`,
+    `How many numbers do you need? Default ${def}`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('1', 'set_count_1'),
@@ -511,7 +507,6 @@ bot.start((ctx) => {
   )
 })
 
-// Number count selection handlers
 for (let n = 1; n <= 3; n++) {
   bot.action(`set_count_${n}`, async (ctx) => {
     const chatId = ctx.chat.id
@@ -533,7 +528,7 @@ bot.action('get_number', async (ctx) => {
 })
 
 bot.launch()
-console.log(`${now()} [BOT] Bot started`)
+log.success('bot started')
 
 process.on('SIGINT', async () => {
   for (const id of Object.keys(pollBrowsers)) await stopPolling(id)
@@ -548,7 +543,7 @@ process.on('SIGTERM', async () => {
 } else {
 ;(async () => {
   const chatId = 'test'
-  log(chatId, 'Running in test mode')
+  log.info('running in test mode', chatId)
 
   let session, pollPage
   const count = testCount
@@ -557,13 +552,13 @@ process.on('SIGTERM', async () => {
     if (!testEmail) throw new Error('--login requires --email')
     const found = Object.values(sessions).find(s => s.email === testEmail)
     if (!found) throw new Error(`No saved session for ${testEmail}`)
-    log(chatId, `Using existing session for ${testEmail}`)
+    log.info(`using existing session for ${testEmail}`, chatId)
     const result = await loginAndGetNumbers({ ...found, chatId }, count, chatId)
     session = { ...found, ...result, chatId }
     pollPage = result.page
   } else {
     const email = testEmail || `${rand(8)}@kilolabs.space`
-    log(chatId, `Email: ${email}`)
+    log.info(`email: ${email}`, chatId)
     const result = await registerAndGetNumbers(count, chatId)
     session = { email, password: DEFAULT_PASSWORD, token: result.token, numbers: result.numbers, chatId }
     pollPage = result.page
@@ -571,17 +566,17 @@ process.on('SIGTERM', async () => {
   }
 
   const numList = session.numbers.map(n => `+48 ${n.number}`).join(', ')
-  log(chatId, `Numbers (${session.numbers.length}): ${numList}`)
-  log(chatId, `Polling for SMS for ${testTimeout / 1000}s, press Ctrl+C to stop`)
+  log.info(`numbers ${session.numbers.length}: ${numList}`, chatId)
+  log.info(`polling for SMS for ${testTimeout / 1000}s, press Ctrl+C to stop`, chatId)
 
   await startPolling(chatId, session, pollPage)
 
   await sleep(testTimeout)
   await stopPolling(chatId)
-  log(chatId, 'Test timeout reached')
+  log.info('test timeout reached', chatId)
   process.exit(0)
 })().catch((e) => {
-  console.error(`${now()} [TEST] Fatal error: ${e.message}`)
+  log.error(`fatal error: ${e.message}`, 'test')
   process.exit(1)
 })
 }
