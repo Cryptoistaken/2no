@@ -613,7 +613,7 @@ async function startPolling(chatId, session, page) {
         const sender = m.from_number || m.from || detectSender(body)
         const time = m.created_at ? new Date(m.created_at).toLocaleString() : ''
         const num = (session.numbers || []).find(n => n.number_id === m.number_id)
-        const numTag = num ? `<code>+48 ${num.number}</code> 🇵🇱` : ''
+        const numTag = num ? `<code>+48${num.number}</code> 🇵🇱` : ''
 
         log.info(`SMS +48 ${num ? num.number : '?'} from ${sender}: ${body.slice(0, 80)}`, chatId)
 
