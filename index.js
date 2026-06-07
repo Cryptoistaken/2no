@@ -811,6 +811,8 @@ async function resumeSessions() {
         if (!token) {
           log.error(`resume login failed for ${chatId}`, chatId)
           await browser.close()
+          delete data.savedSessions[chatId]
+          saveData()
           bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
           return
         }
@@ -821,6 +823,8 @@ async function resumeSessions() {
         printState()
       } catch (e) {
         log.error(`resume failed for ${chatId}: ${e.message}`, chatId)
+        delete data.savedSessions[chatId]
+        saveData()
         bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
       }
     })()
