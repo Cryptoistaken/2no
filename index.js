@@ -339,7 +339,7 @@ async function buyNumbers(page, token, count, solver, captchaPromises, chatId, o
       saveData()
     }
 
-    if (onProgress) onProgress('number', `+48 ${toBuy.number}`)
+    if (onProgress) onProgress('number', `+48${toBuy.number}`)
   }
   return bought
 }
@@ -675,11 +675,11 @@ async function processGetNumber(ctx, count) {
         lastMsgText = data
         ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
       } else if (type === 'number') {
-        numbersBuffer.push(data)
-        const prefix = numbersBuffer.length >= count ? 'All numbers ready!' : `Got ${numbersBuffer.length}/${count}:`
+        numbersBuffer.push(`<code>${data}</code>`)
+        const prefix = numbersBuffer.length >= count ? '<b>All numbers ready!</b>' : `<b>Got ${numbersBuffer.length}/${count}:</b>`
         const text = `${prefix}\n${numbersBuffer.join('\n')}`
         lastMsgText = text
-        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, text).catch(() => {})
+        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, text, { parse_mode: 'HTML' }).catch(() => {})
       }
     } catch {}
   }
@@ -716,9 +716,10 @@ async function processGetNumber(ctx, count) {
 
       await stopPolling(chatId)
 
-      const numList = session.numbers.map(n => `+48 ${n.number}`).join('\n')
+      const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
       await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
-        `Your numbers ${session.numbers.length}:\n${numList}\n\nMonitoring for incoming SMS`
+        `<b>Your numbers (${session.numbers.length}):</b>\n${numList}\n\nMonitoring for incoming SMS`,
+        { parse_mode: 'HTML' }
       ).catch(() => {})
 
       await startPolling(chatId, session, pollPage)
