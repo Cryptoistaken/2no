@@ -43,6 +43,7 @@ if (fs.existsSync(DATA_FILE)) {
 if (!data.users) data.users = {}
 if (!data.proxy) data.proxy = null
 if (!data.stats) data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+if (!data.savedSessions) data.savedSessions = {}
 
 function saveData() {
   const total = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
@@ -232,12 +233,17 @@ async function launchBrowser() {
   const proxy = getProxy()
   const proxyInfo = proxy ? `${proxy.server}` : 'none'
   log.info(`launching browser, proxy ${proxyInfo}`, 'BROWSER')
-  const opts = proxy ? { headless: false, proxy } : { headless: false }
-  const browser = await chromium.launch(opts)
-  const page = await browser.newPage()
-  await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded' })
-  log.success('browser ready', 'BROWSER')
-  return { browser, page }
+  try {
+    const opts = proxy ? { headless: false, proxy } : { headless: false }
+    const browser = await chromium.launch(opts)
+    const page = await browser.newPage()
+    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded' })
+    log.success('browser ready', 'BROWSER')
+    return { browser, page }
+  } catch (e) {
+    if (proxy) log.error(`proxy failed: ${e.message}`, 'PROXY')
+    throw e
+  }
 }
 
 function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
@@ -661,6 +667,12 @@ async function processGetNumber(ctx, count) {
     await ctx.answerCbQuery('Already processing your request')
     return
   }
+  const lastReq = data.users[chatId]?.lastNumberRequest
+  if (lastReq && Date.now() - lastReq < 7200000) {
+    const wait = Math.ceil((7200000 - (Date.now() - lastReq)) / 60000)
+    await ctx.answerCbQuery(`Wait ${wait}min before requesting new numbers`)
+    return
+  }
   log.info('processing flag set', chatId)
   processing[chatId] = true
   await ctx.answerCbQuery()
@@ -703,6 +715,8 @@ async function processGetNumber(ctx, count) {
         }
         pollPage = result.page
         sessions[chatId] = session
+        data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+        saveData()
         log.success(`account created, numbers: ${result.numbers.length}`, chatId)
       } else {
         session.chatId = chatId
@@ -713,10 +727,16 @@ async function processGetNumber(ctx, count) {
         session.numbers = result.numbers
         pollPage = result.page
         sessions[chatId] = session
+        data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+        saveData()
         log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
       }
 
       await stopPolling(chatId)
+
+      const st = userStats(chatId)
+      st.lastNumberRequest = Date.now()
+      saveData()
 
       const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
       await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
@@ -729,6 +749,17 @@ async function processGetNumber(ctx, count) {
     } catch (e) {
       log.error(`error: ${e.message}`, chatId)
       try {
+        const proxy = getProxy()
+        if (proxy) {
+          const test = await testProxy(proxy)
+          if (!test.ok) {
+            ctx.reply('⚠️ Your proxy is not working. Please update it in Settings → Set Proxy.')
+          } else {
+            ctx.reply(`❌ Browser error: ${e.message}`)
+          }
+        } else {
+          ctx.reply(`❌ Error: ${e.message}`)
+        }
         await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
       } catch {}
     } finally {
@@ -736,6 +767,44 @@ async function processGetNumber(ctx, count) {
       delete processing[chatId]
     }
   })()
+}
+
+async function resumeSessions() {
+  const saved = data.savedSessions || {}
+  const entries = Object.entries(saved)
+  if (!entries.length) return
+  log.info(`resuming ${entries.length} saved session(s)`)
+  for (const [chatId, s] of entries) {
+    if (sessions[chatId]) continue
+    ;(async () => {
+      try {
+        const proxy = getProxy()
+        const proxyInfo = proxy ? `${proxy.server}` : 'none'
+        log.info(`resuming session for ${chatId}`, chatId)
+        const opts = proxy ? { headless: false, proxy } : { headless: false }
+        const browser = await chromium.launch(opts)
+        const page = await browser.newPage()
+        await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+        const loginRes = await page.evaluate(async ({ url, email, password }) => {
+          const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: 101, query: { email, password } }),
+          })
+          return r.json()
+        }, { url: API, email: s.email, password: s.password })
+        const token = (loginRes && loginRes.token) || ''
+        if (!token) { log.error(`resume login failed for ${chatId}`, chatId); await browser.close(); return }
+        const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
+        sessions[chatId] = session
+        await startPolling(chatId, session, page)
+        log.success(`session resumed for ${chatId}`, chatId)
+        printState()
+      } catch (e) {
+        log.error(`resume failed for ${chatId}: ${e.message}`, chatId)
+      }
+    })()
+  }
 }
 
 let bot
@@ -905,6 +974,7 @@ bot.action('get_number', async (ctx) => {
 bot.launch()
 log.success('bot started')
 printState()
+resumeSessions()
 
 process.on('SIGINT', async () => {
   for (const id of Object.keys(pollBrowsers)) await stopPolling(id)
