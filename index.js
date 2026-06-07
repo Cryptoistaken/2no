@@ -808,7 +808,12 @@ async function resumeSessions() {
           return r.json()
         }, { url: API, email: s.email, password: s.password })
         const token = (loginRes && loginRes.token) || ''
-        if (!token) { log.error(`resume login failed for ${chatId}`, chatId); await browser.close(); return }
+        if (!token) {
+          log.error(`resume login failed for ${chatId}`, chatId)
+          await browser.close()
+          bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+          return
+        }
         const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
         sessions[chatId] = session
         await startPolling(chatId, session, page)
@@ -816,6 +821,7 @@ async function resumeSessions() {
         printState()
       } catch (e) {
         log.error(`resume failed for ${chatId}: ${e.message}`, chatId)
+        bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
       }
     })()
   }
