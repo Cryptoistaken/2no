@@ -791,42 +791,55 @@ async function resumeSessions() {
   for (const [chatId, s] of entries) {
     if (sessions[chatId]) continue
     ;(async () => {
-      try {
-        const proxy = getProxy()
-        const proxyInfo = proxy ? `${proxy.server}` : 'none'
-        log.info(`resuming session ${chatId}, ${s.numbers.length} number(s): ${s.numbers.map(n => n.number).join(', ')}`, chatId)
-        const opts = proxy ? { headless: false, proxy } : { headless: false }
-        const browser = await chromium.launch(opts)
-        const page = await browser.newPage()
-        await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
-        const loginRes = await page.evaluate(async ({ url, email, password }) => {
-          const r = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id: 101, query: { email, password } }),
-          })
-          return r.json()
-        }, { url: API, email: s.email, password: s.password })
-        const token = (loginRes && loginRes.token) || ''
-        if (!token) {
-          log.error(`resume login failed for ${chatId}`, chatId)
-          await browser.close()
-          delete data.savedSessions[chatId]
-          saveData()
-          bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
-          return
+      let lastError
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (attempt > 1) {
+          const delay = attempt * 10000
+          log.info(`retry ${attempt}/3 for ${chatId} in ${delay}ms`, chatId)
+          await new Promise(r => setTimeout(r, delay))
         }
-        const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
-        sessions[chatId] = session
-        await startPolling(chatId, session, page)
-        log.success(`session resumed for ${chatId}`, chatId)
-        printState()
-      } catch (e) {
-        log.error(`resume failed for ${chatId}: ${e.message}`, chatId)
-        delete data.savedSessions[chatId]
-        saveData()
-        bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+        let browser
+        try {
+          const proxy = getProxy()
+          const proxyInfo = proxy ? `${proxy.server}` : 'none'
+          log.info(`resuming session ${chatId} (attempt ${attempt}/3), ${s.numbers.length} number(s): ${s.numbers.map(n => n.number).join(', ')}`, chatId)
+          const opts = proxy ? { headless: false, proxy } : { headless: false }
+          browser = await chromium.launch(opts)
+          const page = await browser.newPage()
+          await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+          const loginRes = await page.evaluate(async ({ url, email, password }) => {
+            const r = await fetch(url, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: 101, query: { email, password } }),
+            })
+            return r.json()
+          }, { url: API, email: s.email, password: s.password })
+          const token = (loginRes && loginRes.token) || ''
+          if (!token) {
+            log.error(`resume login failed for ${chatId}`, chatId)
+            await browser.close()
+            delete data.savedSessions[chatId]
+            saveData()
+            bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+            return
+          }
+          const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
+          sessions[chatId] = session
+          await startPolling(chatId, session, page)
+          log.success(`session resumed for ${chatId}`, chatId)
+          printState()
+          return
+        } catch (e) {
+          lastError = e.message
+          log.error(`resume attempt ${attempt}/3 failed for ${chatId}: ${e.message}`, chatId)
+          try { await browser.close() } catch (_) {}
+        }
       }
+      log.error(`resume failed for ${chatId} after 3 attempts: ${lastError}`, chatId)
+      delete data.savedSessions[chatId]
+      saveData()
+      bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
     })()
   }
 }
