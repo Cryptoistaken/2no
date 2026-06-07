@@ -176,9 +176,10 @@ function dataMenu() {
   ])
 }
 
-function countMenu() {
+function countMenu(current) {
+  const btn = n => ({ text: n === current ? `* ${n}` : `${n}`, callback_data: `set_count_${n}` })
   return Markup.inlineKeyboard([
-    [Markup.button.callback('1', 'set_count_1'), Markup.button.callback('2', 'set_count_2'), Markup.button.callback('3', 'set_count_3')],
+    [btn(1), btn(2), btn(3)],
     [Markup.button.callback('Back', 'settings')],
   ])
 }
@@ -1111,7 +1112,7 @@ bot.action('settings_count', async (ctx) => {
   log.info('opened count settings', chatId)
   await ctx.answerCbQuery()
   const cur = getUserDefaultNumbers(chatId)
-  await ctx.editMessageText(`Current count: ${cur}. Choose new count:`, countMenu())
+  await ctx.editMessageText(`Current count: ${cur}. Choose new count:`, countMenu(cur))
 })
 
 for (let n = 1; n <= 3; n++) {
@@ -1120,7 +1121,7 @@ for (let n = 1; n <= 3; n++) {
     setUserDefaultNumbers(chatId, n)
     log.info(`default count set to ${n}`, chatId)
     await ctx.answerCbQuery(`Default set to ${n}`)
-    await ctx.editMessageText(`Default set to ${n}`, settingsMenu())
+    await ctx.editMessageText(`Current count: ${n}. Choose new count:`, countMenu(n))
   })
 }
 
