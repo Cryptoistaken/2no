@@ -1,4 +1,9 @@
 {
+  "stats": {
+    "captchaSolved": 0,
+    "numbersGenerated": 0,
+    "messagesReceived": 0
+  },
   "proxy": {
     "server": "http://change4.owlproxy.com:7778",
     "username": "W4FMnPWKP050_custom_zone_ve",

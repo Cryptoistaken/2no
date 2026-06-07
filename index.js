@@ -41,8 +41,18 @@ if (fs.existsSync(DATA_FILE)) {
 }
 if (!data.users) data.users = {}
 if (!data.proxy) data.proxy = null
+if (!data.stats) data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
 
-function saveData() { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)) }
+function saveData() {
+  const total = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+  for (const u of Object.values(data.users)) {
+    total.captchaSolved += u.captchaSolved || 0
+    total.numbersGenerated += u.numbersGenerated || 0
+    total.messagesReceived += u.messagesReceived || 0
+  }
+  data.stats = total
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
+}
 
 function getProxy() { return data.proxy }
 
