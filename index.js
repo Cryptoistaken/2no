@@ -76,6 +76,7 @@ async function testProxy(proxy) {
   try {
     browser = await chromium.launch({ headless: true, proxy, args: ['--no-sandbox'] })
     const page = await browser.newPage()
+    log.info('testing proxy, fetching IP', 'PROXY')
     const resp = await page.goto('https://httpbin.org/ip', { timeout: 15000 })
     const json = await resp.json()
     await page.close()
@@ -180,13 +181,14 @@ async function solveTurnstile(sitekey, pageurl) {
   try { result = JSON.parse(text) } catch { throw new Error(`multibot submit failed: ${text}`) }
   if (result.status !== 1) throw new Error(`multibot returned error: ${text}`)
   const taskId = result.request || result.id
+  log.info(`captcha submitted, task ${taskId}`, 'CAPTCHA')
   for (let i = 0; i < 60; i++) {
     await sleep(3000)
     const cr = await fetch(`https://api.multibot.cloud/res.php?key=${MULTIBOT_KEY}&id=${taskId}&json=1`)
     const ct = await cr.text()
     let c
     try { c = JSON.parse(ct) } catch { throw new Error(`multibot poll parse failed: ${ct}`) }
-    if (c.status === 1) return c.request || c.value
+    if (c.status === 1) { log.info(`captcha solved, task ${taskId}`, 'CAPTCHA'); return c.request || c.value }
     if (c.error && c.error !== 'CAPCHA_NOT_READY') throw new Error(`multibot solve error: ${ct}`)
   }
   throw new Error('captcha solving timed out after 3 minutes')
@@ -216,10 +218,13 @@ async function browserEvalAuth(page, token, body) {
 
 async function launchBrowser() {
   const proxy = getProxy()
+  const proxyInfo = proxy ? `${proxy.server}` : 'none'
+  log.info(`launching browser, proxy ${proxyInfo}`, 'BROWSER')
   const opts = proxy ? { headless: false, proxy } : { headless: false }
   const browser = await chromium.launch(opts)
   const page = await browser.newPage()
   await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded' })
+  log.success('browser ready', 'BROWSER')
   return { browser, page }
 }
 
@@ -229,6 +234,7 @@ function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
 
   async function _solveOne(entry) {
     active++
+    log.info(`captcha solving started, ${queue.length} queued, ${active} active`, chatId)
     try {
       const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
       entry.resolve(token)
@@ -255,6 +261,7 @@ function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
     queueCaptcha() {
       return new Promise((resolve, reject) => {
         queue.push({ resolve, reject })
+        log.info(`captcha queued, total ${queue.length + active} pending`, chatId)
         _drain()
       })
     },
@@ -323,7 +330,7 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     if (onProgress) onProgress('progress', `Creating account attempt ${attempt + 1} of 3`)
     const { browser, page } = await launchBrowser()
 
-    const closeBrowser = () => { try { browser.close() } catch {} }
+    const closeBrowser = () => { log.info('closing browser', chatId); try { browser.close() } catch {} }
 
     const solver = createCaptchaSolver(() => page.url(), chatId, count)
     solver.queueCaptcha()
@@ -352,6 +359,7 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     log.success(`verification email arrived: ${msg.subject}`, chatId)
     if (onProgress) onProgress('progress', 'Verification email received, verifying')
 
+    log.info('fetching email body', chatId)
     const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
     const html = (body && body.html) || ''
     const m = html.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
@@ -360,7 +368,9 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     log.info('clicking verify link', chatId)
     if (onProgress) onProgress('progress', 'Clicking verification link')
 
+    log.info('navigating to verify link', chatId)
     await page.goto(verifyLink)
+    log.info('page loaded, clicking login button', chatId)
     await page.waitForSelector('button:has-text("Go to login page")', { timeout: 20000 })
     await page.locator('button:has-text("Go to login page")').click()
     await page.waitForTimeout(5000)
@@ -375,8 +385,9 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
     const bought = await buyNumbers(page, token, maxBuy, solver, chatId, onProgress)
 
-    if (bought.length === 0) { closeBrowser(); continue }
+    if (bought.length === 0) { log.warning('no numbers bought, retrying', chatId); closeBrowser(); continue }
 
+    log.success(`registration complete, ${bought.length} numbers`, chatId)
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     return { email, password, token, numbers: bought, browser, page }
   }
@@ -385,14 +396,16 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
 
 async function loginAndGetNumbers(session, count, chatId, onProgress) {
   log.info('logging into existing account', chatId)
+  log.info(`email ${session.email}`, chatId)
   if (onProgress) onProgress('progress', 'Logging in')
   const { browser, page } = await launchBrowser()
 
   const solver = createCaptchaSolver(() => page.url(), chatId, count)
 
+  log.info('performing login', chatId)
   const loginRes = await browserEval(page, { id: 101, query: { email: session.email, password: session.password } })
   const token = (loginRes && loginRes.token) || ''
-  if (!token) { await browser.close(); throw new Error('login failed: no token returned') }
+  if (!token) { log.error('login failed: no token returned', chatId); await browser.close(); throw new Error('login failed: no token returned') }
   log.success('login successful', chatId)
   if (onProgress) onProgress('progress', 'Login successful, checking numbers')
 
@@ -404,6 +417,7 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
 
   if (needCount === 0) {
     log.info(`already have ${existing.length} numbers, using existing`, chatId)
+    if (onProgress) onProgress('progress', 'Using existing numbers')
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     const numbers = existing.map(e => ({ number: e.number, number_id: e.number_id }))
     if (onProgress) {
@@ -425,10 +439,12 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
 
 async function stopPolling(chatId) {
   if (pollTimers[chatId]) {
+    log.info('stopping SMS poll timer', chatId)
     clearInterval(pollTimers[chatId])
     delete pollTimers[chatId]
   }
   if (pollBrowsers[chatId]) {
+    log.info('closing poll browser', chatId)
     try { await pollBrowsers[chatId].browser.close() } catch {}
     delete pollBrowsers[chatId]
   }
@@ -574,10 +590,12 @@ async function processGetNumber(ctx, count) {
     await ctx.answerCbQuery('Already processing your request')
     return
   }
+  log.info('processing flag set', chatId)
   processing[chatId] = true
   await ctx.answerCbQuery()
   const msg = await ctx.reply(`Getting ${count} numbers, this may take a minute`)
   log.info(`user requested ${count} numbers`, chatId)
+  log.info('launching background task', chatId)
 
   const numbersBuffer = []
   let lastMsgText = ''
@@ -642,6 +660,7 @@ async function processGetNumber(ctx, count) {
         await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
       } catch {}
     } finally {
+      log.info('processing flag cleared', chatId)
       delete processing[chatId]
     }
   })()
@@ -653,7 +672,7 @@ const bot = new Telegraf(TG_TOKEN)
 bot.use((ctx, next) => {
   const chatId = ctx.chat?.id
   if (chatId && !AUTHORIZED_USERS.has(chatId)) {
-    log.error('unauthorized access attempt', chatId)
+    log.error(`unauthorized access attempt from ${chatId}`, 'AUTH')
     return ctx.reply('You are not authorized to use this bot.')
   }
   return next()
@@ -661,7 +680,7 @@ bot.use((ctx, next) => {
 
 bot.start((ctx) => {
   const chatId = ctx.chat.id
-  log.info('bot started by user', chatId)
+  log.info('bot started by user, showing main menu', chatId)
   return ctx.reply('Choose an option:', mainMenu())
 })
 
@@ -687,11 +706,15 @@ bot.on('text', async (ctx) => {
 })
 
 bot.action('settings', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('opened settings', chatId)
   await ctx.answerCbQuery()
   await ctx.editMessageText('Settings:', settingsMenu())
 })
 
 bot.action('settings_back', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('back to main menu', chatId)
   await ctx.answerCbQuery()
   await ctx.editMessageText('Choose an option:', mainMenu())
 })
@@ -713,6 +736,8 @@ bot.action('settings_testproxy', async (ctx) => {
 })
 
 bot.action('settings_proxy', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('requested proxy change', chatId)
   await ctx.answerCbQuery()
   const proxy = getProxy()
   const currentInfo = proxy ? `Current: ${proxy.server}` : 'No proxy set'
@@ -721,8 +746,9 @@ bot.action('settings_proxy', async (ctx) => {
 })
 
 bot.action('settings_status', async (ctx) => {
-  await ctx.answerCbQuery()
   const chatId = ctx.chat.id
+  log.info('viewed status', chatId)
+  await ctx.answerCbQuery()
   const st = userStats(chatId)
   const nums = (st.numbers || []).map(n => `+48 ${n.number}`).join(', ') || 'none'
   const lines = [
@@ -735,8 +761,9 @@ bot.action('settings_status', async (ctx) => {
 })
 
 bot.action('settings_count', async (ctx) => {
-  await ctx.answerCbQuery()
   const chatId = ctx.chat.id
+  log.info('opened count settings', chatId)
+  await ctx.answerCbQuery()
   const cur = getUserDefaultNumbers(chatId)
   await ctx.editMessageText(`Current count: ${cur}. Choose new count:`, countMenu())
 })
@@ -745,6 +772,7 @@ for (let n = 1; n <= 3; n++) {
   bot.action(`set_count_${n}`, async (ctx) => {
     const chatId = ctx.chat.id
     setUserDefaultNumbers(chatId, n)
+    log.info(`default count set to ${n}`, chatId)
     await ctx.answerCbQuery(`Default set to ${n}`)
     await ctx.editMessageText(`Default set to ${n}`, settingsMenu())
   })
