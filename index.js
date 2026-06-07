@@ -93,15 +93,16 @@ function printState() {
   const proxy = getProxy()
   const proxyInfo = proxy ? `${proxy.server}` : 'none'
   const s = data.stats || { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+  const totalEmails = Object.values(data.users).reduce((sum, u) => sum + (u.emails?.length || 0), 0)
   console.log('')
   log.info(`proxy: ${proxyInfo}`)
-  log.info(`total: ${s.captchaSolved} captcha, ${s.numbersGenerated} numbers, ${s.messagesReceived} msgs`)
+  log.info(`total: ${s.captchaSolved} captcha, ${s.numbersGenerated} numbers, ${s.messagesReceived} msgs, ${totalEmails} emails`)
   for (const [id, u] of Object.entries(data.users)) {
     let state = 'idle'
     if (processing[id]) state = 'getting numbers'
     else if (pollBrowsers[id]) state = 'polling'
     const nums = (u.numbers || []).length
-    log.info(`${id} [${state}] ${nums} numbers`, 'USER')
+    log.info(`${id} ${state} ${nums} numbers`, 'USER')
   }
   console.log('')
 }
@@ -130,13 +131,13 @@ function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
 }
 
-const _ts = () => new Date().toLocaleString('en-GB', { hour12: false })
+const _ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false })
 
 const log = {
-  info: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
-  success: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
-  error: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
-  warning: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
+  info: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  success: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  error: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  warning: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
 }
 
 function userStats(chatId) {
