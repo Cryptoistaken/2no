@@ -123,6 +123,7 @@ const seenMessages = {}
 const processing = {}
 const reAuthLocks = {}
 const pendingProxy = {}
+const pendingImport = {}
 
 function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
@@ -139,7 +140,7 @@ const log = {
 
 function userStats(chatId) {
   if (!data.users[chatId]) {
-    data.users[chatId] = { defaultNumbers: 3, captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0, numbers: [], messages: [] }
+    data.users[chatId] = { defaultNumbers: 3, captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0, numbers: [], messages: [], emails: [] }
     saveData()
   }
   return data.users[chatId]
@@ -157,7 +158,16 @@ function settingsMenu() {
     [Markup.button.callback('Set Proxy', 'settings_proxy'), Markup.button.callback('Test Proxy', 'settings_testproxy')],
     [Markup.button.callback('Status', 'settings_status')],
     [Markup.button.callback('Number Count', 'settings_count')],
+    [Markup.button.callback('Data', 'settings_data')],
     [Markup.button.callback('Back', 'settings_back')],
+  ])
+}
+
+function dataMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Export', 'data_export')],
+    [Markup.button.callback('Import', 'data_import')],
+    [Markup.button.callback('Back', 'settings')],
   ])
 }
 
@@ -388,6 +398,12 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     if (bought.length === 0) { log.warning('no numbers bought, retrying', chatId); closeBrowser(); continue }
 
     log.success(`registration complete, ${bought.length} numbers`, chatId)
+    if (chatId) {
+      const st = userStats(chatId)
+      if (!st.emails) st.emails = []
+      st.emails.push({ email, createdAt: new Date().toISOString() })
+      saveData()
+    }
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     return { email, password, token, numbers: bought, browser, page }
   }
@@ -686,6 +702,28 @@ bot.start((ctx) => {
 
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id
+  if (pendingImport[chatId]) {
+    delete pendingImport[chatId]
+    if (!ctx.message.document) return ctx.reply('Send a file please')
+    try {
+      const fileId = ctx.message.document.file_id
+      const fileLink = await ctx.telegram.getFileLink(fileId)
+      const resp = await fetch(fileLink.href)
+      const raw = await resp.text()
+      const imported = JSON.parse(raw)
+      if (!imported || typeof imported !== 'object') throw new Error('invalid format')
+      data = imported
+      if (!data.users) data.users = {}
+      if (!data.stats) data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+      saveData()
+      log.success('data imported successfully', chatId)
+      return ctx.reply('Data imported successfully')
+    } catch (e) {
+      log.error(`import failed: ${e.message}`, chatId)
+      return ctx.reply(`Import failed: ${e.message}`)
+    }
+  }
+
   if (pendingProxy[chatId]) {
     delete pendingProxy[chatId]
     const input = ctx.message.text.trim()
@@ -717,6 +755,29 @@ bot.action('settings_back', async (ctx) => {
   log.info('back to main menu', chatId)
   await ctx.answerCbQuery()
   await ctx.editMessageText('Choose an option:', mainMenu())
+})
+
+bot.action('settings_data', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('opened data menu', chatId)
+  await ctx.answerCbQuery()
+  await ctx.editMessageText('Data management:', dataMenu())
+})
+
+bot.action('data_export', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('exporting data', chatId)
+  await ctx.answerCbQuery()
+  const buf = Buffer.from(JSON.stringify(data, null, 2), 'utf8')
+  await ctx.replyWithDocument({ source: buf, filename: 'data.json' })
+})
+
+bot.action('data_import', async (ctx) => {
+  const chatId = ctx.chat.id
+  log.info('requested data import', chatId)
+  await ctx.answerCbQuery()
+  pendingImport[chatId] = true
+  await ctx.editMessageText('Send me the data.json file to import')
 })
 
 bot.action('settings_testproxy', async (ctx) => {
