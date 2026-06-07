@@ -243,13 +243,14 @@ async function launchBrowser() {
 function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
   const queue = []
   let active = 0
+  const CAPTCHA_TTL = 250000
 
   async function _solveOne(entry) {
     active++
     log.info(`captcha solving started, ${queue.length} queued, ${active} active`, chatId)
     try {
       const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
-      entry.resolve(token)
+      entry.resolve({ token, solvedAt: Date.now() })
       if (chatId) {
         const st = userStats(chatId)
         st.captchaSolved = (st.captchaSolved || 0) + 1
@@ -269,20 +270,33 @@ function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
     }
   }
 
+  function _queueCaptcha() {
+    return new Promise((resolve, reject) => {
+      queue.push({ resolve, reject })
+      log.info(`captcha queued, total ${queue.length + active} pending`, chatId)
+      _drain()
+    })
+  }
+
   return {
     queueCaptcha() {
-      return new Promise((resolve, reject) => {
-        queue.push({ resolve, reject })
-        log.info(`captcha queued, total ${queue.length + active} pending`, chatId)
-        _drain()
+      return _queueCaptcha().then(r => r.token)
+    },
+    getValidToken() {
+      return _queueCaptcha().then(async ({ token, solvedAt }) => {
+        if (Date.now() - solvedAt > CAPTCHA_TTL) return this.getValidToken()
+        return token
       })
+    },
+    preQueue(n) {
+      return Array.from({ length: n }, () => _queueCaptcha())
     },
     getPendingCount() { return queue.length },
     getActiveCount() { return active },
   }
 }
 
-async function buyNumbers(page, token, count, solver, chatId, onProgress) {
+async function buyNumbers(page, token, count, solver, captchaPromises, chatId, onProgress) {
   const bought = []
   for (let i = 0; i < count; i++) {
     log.info(`buying number ${i + 1}/${count}`, chatId)
@@ -296,8 +310,8 @@ async function buyNumbers(page, token, count, solver, chatId, onProgress) {
     const toBuy = avail.result[0]
     log.info(`available: ${toBuy.number} id ${toBuy.id}`, chatId)
 
-    if (onProgress) onProgress('progress', `Solving captcha for number ${i + 1}`)
-    const captchaToken = await solver.queueCaptcha()
+    const { token: captchaToken, solvedAt } = await captchaPromises[i]
+    const validToken = Date.now() - solvedAt > 250000 ? await solver.getValidToken() : captchaToken
     log.info('captcha ready, buying', chatId)
 
     const buyRes = await browserEvalAuth(page, token, {
@@ -307,7 +321,7 @@ async function buyNumbers(page, token, count, solver, chatId, onProgress) {
         availability_days: [1, 2, 3, 4, 5, 6, 7],
         hour_from: '00:00:00.000Z', hour_to: '23:59:59.999Z',
         right_to_transfer_number: true, marketing: false,
-        response_key: captchaToken,
+        response_key: validToken,
       },
     })
     if (!buyRes.success) {
@@ -326,10 +340,6 @@ async function buyNumbers(page, token, count, solver, chatId, onProgress) {
     }
 
     if (onProgress) onProgress('number', `+48 ${toBuy.number}`)
-
-    if (i + 1 < count) {
-      solver.queueCaptcha()
-    }
   }
   return bought
 }
@@ -345,7 +355,7 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     const closeBrowser = () => { log.info('closing browser', chatId); try { browser.close() } catch {} }
 
     const solver = createCaptchaSolver(() => page.url(), chatId, count)
-    solver.queueCaptcha()
+    const captchaPromises = solver.preQueue(count)
 
     const reg = await browserEval(page, { id: 103, query: { email, password } })
     if (!reg.success) {
@@ -356,8 +366,6 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     }
     log.success(`account created: ${email}`, chatId)
     if (onProgress) onProgress('progress', 'Account created, waiting for verification email')
-
-    solver.queueCaptcha()
 
     log.info('waiting for verification email', chatId)
     let msg = null
@@ -395,7 +403,7 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     log.success('auth token obtained', chatId)
 
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
-    const bought = await buyNumbers(page, token, maxBuy, solver, chatId, onProgress)
+    const bought = await buyNumbers(page, token, maxBuy, solver, captchaPromises, chatId, onProgress)
 
     if (bought.length === 0) { log.warning('no numbers bought, retrying', chatId); closeBrowser(); continue }
 
@@ -446,9 +454,9 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
 
   log.info(`need to buy ${needCount} more numbers`, chatId)
   if (onProgress) onProgress('progress', `Need to buy ${needCount} more numbers`)
-  solver.queueCaptcha()
+  const captchaPromises = solver.preQueue(needCount)
 
-  const bought = await buyNumbers(page, token, needCount, solver, chatId, onProgress)
+  const bought = await buyNumbers(page, token, needCount, solver, captchaPromises, chatId, onProgress)
   const allNumbers = [...existing.map(e => ({ number: e.number, number_id: e.number_id })), ...bought]
 
   await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
