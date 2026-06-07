@@ -124,6 +124,8 @@ const pollTimers = {}
 const pollBrowsers = {}
 const seenMessages = {}
 const processing = {}
+const monitorMessages = {}
+const autoStopTimers = {}
 const reAuthLocks = {}
 const pendingProxy = {}
 const pendingImport = {}
@@ -480,6 +482,10 @@ async function stopPolling(chatId) {
     try { await pollBrowsers[chatId].browser.close() } catch {}
     delete pollBrowsers[chatId]
   }
+  if (autoStopTimers[chatId]) {
+    clearTimeout(autoStopTimers[chatId])
+    delete autoStopTimers[chatId]
+  }
   printState()
 }
 
@@ -648,6 +654,19 @@ async function startPolling(chatId, session, page) {
       log.error(`polling error: ${e.message}`, chatId)
     }
   }, 5000)
+  autoStopTimers[chatId] = setTimeout(() => {
+    log.info('2-hour auto-stop triggered', chatId)
+    stopPolling(chatId)
+    const msgId = monitorMessages[chatId]
+    if (msgId) {
+      const startBtn = [[{ text: 'Start Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
+      bot.telegram.editMessageText(chatId, msgId, undefined,
+        '<b>Monitoring auto-stopped (2h limit)</b>\n\nClick Start to resume monitoring your numbers.',
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: startBtn } }
+      ).catch(() => {})
+    }
+    printState()
+  }, 7200000)
 }
 
 function getUserDefaultNumbers(chatId) {
@@ -739,9 +758,11 @@ async function processGetNumber(ctx, count) {
       saveData()
 
       const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
+      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msg.message_id}` }]]
+      monitorMessages[chatId] = msg.message_id
       await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
-        `<b>Your numbers (${session.numbers.length}):</b>\n${numList}\n\nMonitoring for incoming SMS`,
-        { parse_mode: 'HTML' }
+        `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
       ).catch(() => {})
 
       await startPolling(chatId, session, pollPage)
@@ -866,6 +887,100 @@ bot.on('text', async (ctx) => {
     log.success(`proxy updated to ${parsed.server}, ip ${result.ip}`, chatId)
     printState()
     return ctx.reply(`Proxy updated and working, IP: ${result.ip}`)
+  }
+})
+
+bot.action(/stop_(\d+)_(\d+)/, async (ctx) => {
+  const chatId = Number(ctx.match[1])
+  const msgId = Number(ctx.match[2])
+  if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
+  await ctx.answerCbQuery()
+  const confirm = [[
+    { text: 'Yes, stop', callback_data: `stop_confirm_${chatId}_${msgId}` },
+    { text: 'No', callback_data: `stop_cancel_${chatId}_${msgId}` },
+  ]]
+  await ctx.editMessageReplyMarkup({ inline_keyboard: confirm })
+})
+
+bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
+  const chatId = Number(ctx.match[1])
+  const msgId = Number(ctx.match[2])
+  if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
+  await ctx.answerCbQuery('Stopped monitoring')
+  await stopPolling(chatId)
+  if (sessions[chatId]) sessions[chatId].numbers = []
+  saveData()
+  const startBtn = [[{ text: 'Start Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
+  await ctx.telegram.editMessageText(chatId, msgId, undefined,
+    '<b>Monitoring stopped</b>\n\nClick Start to resume monitoring your numbers.',
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: startBtn } }
+  ).catch(() => {})
+  printState()
+})
+
+bot.action(/stop_cancel_(\d+)_(\d+)/, async (ctx) => {
+  const chatId = Number(ctx.match[1])
+  const msgId = Number(ctx.match[2])
+  if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
+  await ctx.answerCbQuery()
+  const session = sessions[chatId]
+  if (session && session.numbers.length) {
+    const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
+    const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
+    ).catch(() => {})
+  } else {
+    await ctx.editMessageReplyMarkup({})
+  }
+})
+
+bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
+  const chatId = Number(ctx.match[1])
+  const msgId = Number(ctx.match[2])
+  if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
+  await ctx.answerCbQuery()
+  const session = sessions[chatId]
+  if (!session || !session.numbers.length) {
+    return ctx.editMessageText('No numbers to monitor. Use /get to get numbers first.').catch(() => {})
+  }
+  const oldest = session.numbers.reduce((min, n) => Math.min(min, n.created_at || Infinity), Infinity) * 1000
+  if (oldest && Date.now() - oldest > 86400000) {
+    return ctx.telegram.editMessageText(chatId, msgId, undefined,
+      'Numbers have expired (24h limit). Use /get to get new numbers.'
+    ).catch(() => {})
+  }
+  try {
+    const proxy = getProxy()
+    const opts = proxy ? { headless: false, proxy } : { headless: false }
+    const browser = await chromium.launch(opts)
+    const page = await browser.newPage()
+    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+    const loginRes = await page.evaluate(async ({ url, email, password }) => {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 101, query: { email, password } }),
+      })
+      return r.json()
+    }, { url: API, email: session.email, password: session.password })
+    const token = (loginRes && loginRes.token) || ''
+    if (!token) throw new Error('login failed')
+    session.token = token
+    sessions[chatId] = session
+    await startPolling(chatId, session, page)
+    monitorMessages[chatId] = msgId
+    const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
+    const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
+    ).catch(() => {})
+    printState()
+  } catch (e) {
+    log.error(`start monitor failed: ${e.message}`, chatId)
+    await ctx.telegram.editMessageText(chatId, msgId, undefined, `Error: ${e.message}`).catch(() => {})
   }
 })
 
