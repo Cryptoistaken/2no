@@ -730,6 +730,7 @@ async function processGetNumber(ctx, count) {
         pollPage = result.page
         sessions[chatId] = session
         data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+        userStats(chatId).numbers = result.numbers.map(n => n.number)
         saveData()
         log.success(`account created, numbers: ${result.numbers.length}`, chatId)
       } else {
@@ -742,6 +743,7 @@ async function processGetNumber(ctx, count) {
         pollPage = result.page
         sessions[chatId] = session
         data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+        userStats(chatId).numbers = result.numbers.map(n => n.number)
         saveData()
         log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
       }
