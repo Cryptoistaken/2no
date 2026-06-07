@@ -1022,7 +1022,7 @@ bot.action('data_import', async (ctx) => {
   log.info('requested data import', chatId)
   await ctx.answerCbQuery()
   pendingImport[chatId] = true
-  await ctx.editMessageText('Send me the data.json file to import')
+  await ctx.editMessageText('Send me the data.json file to import', dataMenu())
 })
 
 bot.action('settings_testproxy', async (ctx) => {
@@ -1048,7 +1048,8 @@ bot.action('settings_proxy', async (ctx) => {
   const proxy = getProxy()
   const currentInfo = proxy ? `Current: ${proxy.username ? proxy.server.replace('://', `://${proxy.username}:${proxy.password}@`) : proxy.server}` : 'No proxy set'
   pendingProxy[ctx.chat.id] = true
-  await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`)
+  await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`, 
+    Markup.inlineKeyboard([[Markup.button.callback('Back', 'settings')]]))
 })
 
 bot.action('settings_status', async (ctx) => {
