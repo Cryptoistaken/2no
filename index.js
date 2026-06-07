@@ -76,14 +76,32 @@ async function testProxy(proxy) {
   try {
     browser = await chromium.launch({ headless: true, proxy, args: ['--no-sandbox'] })
     const page = await browser.newPage()
-    await page.goto('https://httpbin.org/ip', { timeout: 15000 })
+    const resp = await page.goto('https://httpbin.org/ip', { timeout: 15000 })
+    const json = await resp.json()
     await page.close()
-    return true
+    return { ok: true, ip: json.origin }
   } catch {
-    return false
+    return { ok: false }
   } finally {
     if (browser) try { await browser.close() } catch {}
   }
+}
+
+function printState() {
+  const proxy = getProxy()
+  const proxyInfo = proxy ? `${proxy.server}` : 'none'
+  const s = data.stats || { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
+  console.log('')
+  log.info(`proxy: ${proxyInfo}`)
+  log.info(`total: ${s.captchaSolved} captcha, ${s.numbersGenerated} numbers, ${s.messagesReceived} msgs`)
+  for (const [id, u] of Object.entries(data.users)) {
+    let state = 'idle'
+    if (processing[id]) state = 'getting numbers'
+    else if (pollBrowsers[id]) state = 'polling'
+    const nums = (u.numbers || []).length
+    log.info(`${id} [${state}] ${nums} numbers`, 'USER')
+  }
+  console.log('')
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
@@ -396,6 +414,7 @@ async function stopPolling(chatId) {
     try { await pollBrowsers[chatId].browser.close() } catch {}
     delete pollBrowsers[chatId]
   }
+  printState()
 }
 
 async function pollApi(page, token, body) {
@@ -581,6 +600,7 @@ async function processGetNumber(ctx, count) {
     )
 
     await startPolling(chatId, session, pollPage)
+    printState()
   } catch (e) {
     log.error(`error: ${e.message}`, chatId)
     await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
@@ -616,14 +636,15 @@ bot.on('text', async (ctx) => {
     if (!parsed) {
       return ctx.reply('Invalid proxy format. Use: http://user:pass@host:port')
     }
-    const ok = await testProxy(parsed)
-    if (!ok) {
+    const result = await testProxy(parsed)
+    if (!result.ok) {
       return ctx.reply('Proxy test failed, address may be invalid or unreachable')
     }
     data.proxy = parsed
     saveData()
-    log.info(`proxy updated to ${parsed.server}`, chatId)
-    return ctx.reply('Proxy updated and working')
+    log.success(`proxy updated to ${parsed.server}, ip ${result.ip}`, chatId)
+    printState()
+    return ctx.reply(`Proxy updated and working, IP: ${result.ip}`)
   }
 })
 
@@ -644,10 +665,12 @@ bot.action('settings_testproxy', async (ctx) => {
   if (!proxy) {
     return ctx.reply('No proxy set')
   }
-  const ok = await testProxy(proxy)
-  if (ok) {
-    return ctx.reply('Proxy is working')
+  const result = await testProxy(proxy)
+  if (result.ok) {
+    log.success(`proxy test ok, ip ${result.ip}`, chatId)
+    return ctx.reply(`Proxy is working, IP: ${result.ip}`)
   }
+  log.error('proxy test failed', chatId)
   return ctx.reply('Proxy test failed, provide a new one')
 })
 
@@ -695,6 +718,7 @@ bot.action('get_number', async (ctx) => {
 
 bot.launch()
 log.success('bot started')
+printState()
 
 process.on('SIGINT', async () => {
   for (const id of Object.keys(pollBrowsers)) await stopPolling(id)
