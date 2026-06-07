@@ -91,7 +91,7 @@ async function testProxy(proxy) {
 
 function printState() {
   const proxy = getProxy()
-  const proxyInfo = proxy ? `${proxy.server}` : 'none'
+  const proxyInfo = proxy ? `${proxy.username ? proxy.server.replace('://', `://${proxy.username}:${proxy.password}@`) : proxy.server}` : 'none'
   const s = data.stats || { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
   const totalEmails = Object.values(data.users).reduce((sum, u) => sum + (u.emails?.length || 0), 0)
   console.log('')
@@ -803,7 +803,7 @@ bot.action('settings_proxy', async (ctx) => {
   log.info('requested proxy change', chatId)
   await ctx.answerCbQuery()
   const proxy = getProxy()
-  const currentInfo = proxy ? `Current: ${proxy.server}` : 'No proxy set'
+  const currentInfo = proxy ? `Current: ${proxy.username ? proxy.server.replace('://', `://${proxy.username}:${proxy.password}@`) : proxy.server}` : 'No proxy set'
   pendingProxy[ctx.chat.id] = true
   await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`)
 })
