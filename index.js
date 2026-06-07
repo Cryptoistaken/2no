@@ -127,11 +127,13 @@ function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
 }
 
+const _ts = () => new Date().toLocaleString('en-GB', { hour12: false })
+
 const log = {
-  info: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
-  success: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
-  error: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
-  warning: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
+  info: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
+  success: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
+  error: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
+  warning: (msg, tag) => console.log(tag != null ? `${chalk.gray(`[${_ts()}]`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`[${_ts()}]`)} ${chalk.white(msg)}`),
 }
 
 function userStats(chatId) {
@@ -221,31 +223,31 @@ async function launchBrowser() {
   return { browser, page }
 }
 
-function createCaptchaSolver(getPageUrl, chatId) {
+function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
   const queue = []
-  let solving = false
+  let active = 0
 
-  async function _solveNext() {
-    if (solving) return
-    solving = true
+  async function _solveOne(entry) {
+    active++
     try {
-      while (queue.length > 0) {
-        const entry = queue[0]
-        try {
-          const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
-          entry.resolve(token)
-          if (chatId) {
-            const st = userStats(chatId)
-            st.captchaSolved = (st.captchaSolved || 0) + 1
-            saveData()
-          }
-        } catch (e) {
-          entry.reject(e)
-        }
-        queue.shift()
+      const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
+      entry.resolve(token)
+      if (chatId) {
+        const st = userStats(chatId)
+        st.captchaSolved = (st.captchaSolved || 0) + 1
+        saveData()
       }
+    } catch (e) {
+      entry.reject(e)
     } finally {
-      solving = false
+      active--
+      _drain()
+    }
+  }
+
+  function _drain() {
+    while (queue.length > 0 && active < maxConcurrent) {
+      _solveOne(queue.shift())
     }
   }
 
@@ -253,17 +255,19 @@ function createCaptchaSolver(getPageUrl, chatId) {
     queueCaptcha() {
       return new Promise((resolve, reject) => {
         queue.push({ resolve, reject })
-        _solveNext()
+        _drain()
       })
     },
     getPendingCount() { return queue.length },
+    getActiveCount() { return active },
   }
 }
 
-async function buyNumbers(page, token, count, solver, chatId) {
+async function buyNumbers(page, token, count, solver, chatId, onProgress) {
   const bought = []
   for (let i = 0; i < count; i++) {
     log.info(`buying number ${i + 1}/${count}`, chatId)
+    if (onProgress) onProgress('progress', `Buying number ${i + 1}/${count}`)
 
     const avail = await browserEvalAuth(page, token, { id: 310 })
     if (!avail.result || !avail.result.length) {
@@ -273,7 +277,7 @@ async function buyNumbers(page, token, count, solver, chatId) {
     const toBuy = avail.result[0]
     log.info(`available: ${toBuy.number} id ${toBuy.id}`, chatId)
 
-    log.info('waiting for captcha token', chatId)
+    if (onProgress) onProgress('progress', `Solving captcha for number ${i + 1}`)
     const captchaToken = await solver.queueCaptcha()
     log.info('captcha ready, buying', chatId)
 
@@ -302,6 +306,8 @@ async function buyNumbers(page, token, count, solver, chatId) {
       saveData()
     }
 
+    if (onProgress) onProgress('number', `+48 ${toBuy.number}`)
+
     if (i + 1 < count) {
       solver.queueCaptcha()
     }
@@ -309,16 +315,17 @@ async function buyNumbers(page, token, count, solver, chatId) {
   return bought
 }
 
-async function registerAndGetNumbers(count, chatId) {
+async function registerAndGetNumbers(count, chatId, onProgress) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const email = `${rand(8)}@kilolabs.space`
     const password = DEFAULT_PASSWORD
     log.info(`registration attempt ${attempt + 1} with email ${email}`, chatId)
+    if (onProgress) onProgress('progress', `Creating account attempt ${attempt + 1} of 3`)
     const { browser, page } = await launchBrowser()
 
     const closeBrowser = () => { try { browser.close() } catch {} }
 
-    const solver = createCaptchaSolver(() => page.url(), chatId)
+    const solver = createCaptchaSolver(() => page.url(), chatId, count)
     solver.queueCaptcha()
 
     const reg = await browserEval(page, { id: 103, query: { email, password } })
@@ -329,6 +336,7 @@ async function registerAndGetNumbers(count, chatId) {
       throw new Error(`register failed: ${JSON.stringify(reg)}`)
     }
     log.success(`account created: ${email}`, chatId)
+    if (onProgress) onProgress('progress', 'Account created, waiting for verification email')
 
     solver.queueCaptcha()
 
@@ -342,6 +350,7 @@ async function registerAndGetNumbers(count, chatId) {
     }
     if (!msg) { log.warning('verification email not received', chatId); closeBrowser(); continue }
     log.success(`verification email arrived: ${msg.subject}`, chatId)
+    if (onProgress) onProgress('progress', 'Verification email received, verifying')
 
     const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
     const html = (body && body.html) || ''
@@ -349,6 +358,7 @@ async function registerAndGetNumbers(count, chatId) {
     const verifyLink = m ? m[0].replace(/&amp;/g, '&') : null
     if (!verifyLink) { log.warning('no verify link in email', chatId); closeBrowser(); continue }
     log.info('clicking verify link', chatId)
+    if (onProgress) onProgress('progress', 'Clicking verification link')
 
     await page.goto(verifyLink)
     await page.waitForSelector('button:has-text("Go to login page")', { timeout: 20000 })
@@ -356,13 +366,14 @@ async function registerAndGetNumbers(count, chatId) {
     await page.waitForTimeout(5000)
 
     log.info('getting auth token', chatId)
+    if (onProgress) onProgress('progress', 'Getting auth token')
     const loginRes = await browserEval(page, { id: 101, query: { email, password } })
     const token = (loginRes && loginRes.token) || ''
     if (!token) { log.error('failed to get auth token after registration', chatId); closeBrowser(); continue }
     log.success('auth token obtained', chatId)
 
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
-    const bought = await buyNumbers(page, token, maxBuy, solver, chatId)
+    const bought = await buyNumbers(page, token, maxBuy, solver, chatId, onProgress)
 
     if (bought.length === 0) { closeBrowser(); continue }
 
@@ -372,16 +383,18 @@ async function registerAndGetNumbers(count, chatId) {
   throw new Error('registration failed after 3 attempts')
 }
 
-async function loginAndGetNumbers(session, count, chatId) {
+async function loginAndGetNumbers(session, count, chatId, onProgress) {
   log.info('logging into existing account', chatId)
+  if (onProgress) onProgress('progress', 'Logging in')
   const { browser, page } = await launchBrowser()
 
-  const solver = createCaptchaSolver(() => page.url(), chatId)
+  const solver = createCaptchaSolver(() => page.url(), chatId, count)
 
   const loginRes = await browserEval(page, { id: 101, query: { email: session.email, password: session.password } })
   const token = (loginRes && loginRes.token) || ''
   if (!token) { await browser.close(); throw new Error('login failed: no token returned') }
   log.success('login successful', chatId)
+  if (onProgress) onProgress('progress', 'Login successful, checking numbers')
 
   const myNums = await browserEvalAuth(page, token, { id: 311 })
   const existing = myNums.result || []
@@ -392,13 +405,18 @@ async function loginAndGetNumbers(session, count, chatId) {
   if (needCount === 0) {
     log.info(`already have ${existing.length} numbers, using existing`, chatId)
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-    return { token, numbers: existing.map(e => ({ number: e.number, number_id: e.number_id })), browser, page }
+    const numbers = existing.map(e => ({ number: e.number, number_id: e.number_id }))
+    if (onProgress) {
+      for (const n of numbers) onProgress('number', `+48 ${n.number}`)
+    }
+    return { token, numbers, browser, page }
   }
 
   log.info(`need to buy ${needCount} more numbers`, chatId)
+  if (onProgress) onProgress('progress', `Need to buy ${needCount} more numbers`)
   solver.queueCaptcha()
 
-  const bought = await buyNumbers(page, token, needCount, solver, chatId)
+  const bought = await buyNumbers(page, token, needCount, solver, chatId, onProgress)
   const allNumbers = [...existing.map(e => ({ number: e.number, number_id: e.number_id })), ...bought]
 
   await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
@@ -561,52 +579,72 @@ async function processGetNumber(ctx, count) {
   const msg = await ctx.reply(`Getting ${count} numbers, this may take a minute`)
   log.info(`user requested ${count} numbers`, chatId)
 
-  try {
-    let session = sessions[chatId]
-    let pollPage
+  const numbersBuffer = []
+  let lastMsgText = ''
 
-    if (!session) {
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Creating account')
-      log.info('no existing session, starting registration', chatId)
-      const result = await registerAndGetNumbers(count, chatId)
-      session = {
-        email: result.email,
-        password: DEFAULT_PASSWORD,
-        token: result.token,
-        numbers: result.numbers,
-        chatId: chatId,
+  const onProgress = (type, data) => {
+    try {
+      if (type === 'progress') {
+        lastMsgText = data
+        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
+      } else if (type === 'number') {
+        numbersBuffer.push(data)
+        const prefix = numbersBuffer.length >= count ? 'All numbers ready!' : `Got ${numbersBuffer.length}/${count}:`
+        const text = `${prefix}\n${numbersBuffer.join('\n')}`
+        lastMsgText = text
+        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, text).catch(() => {})
       }
-      pollPage = result.page
-      sessions[chatId] = session
-      log.success(`account created, numbers: ${result.numbers.length}`, chatId)
-    } else {
-      session.chatId = chatId
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Logging in')
-      log.info('existing session found, logging in', chatId)
-      session.email = session.email || session._email
-      const result = await loginAndGetNumbers(session, count, chatId)
-      session.token = result.token
-      session.numbers = result.numbers
-      pollPage = result.page
-      sessions[chatId] = session
-      log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
-    }
-
-    await stopPolling(chatId)
-
-    const numList = session.numbers.map(n => `+48 ${n.number}`).join('\n')
-    await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
-      `Your numbers ${session.numbers.length}:\n${numList}\n\nMonitoring for incoming SMS`
-    )
-
-    await startPolling(chatId, session, pollPage)
-    printState()
-  } catch (e) {
-    log.error(`error: ${e.message}`, chatId)
-    await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
-  } finally {
-    delete processing[chatId]
+    } catch {}
   }
+
+  ;(async () => {
+    try {
+      let session = sessions[chatId]
+      let pollPage
+
+      if (!session) {
+        log.info('no existing session, starting registration', chatId)
+        const result = await registerAndGetNumbers(count, chatId, onProgress)
+        session = {
+          email: result.email,
+          password: DEFAULT_PASSWORD,
+          token: result.token,
+          numbers: result.numbers,
+          chatId: chatId,
+        }
+        pollPage = result.page
+        sessions[chatId] = session
+        log.success(`account created, numbers: ${result.numbers.length}`, chatId)
+      } else {
+        session.chatId = chatId
+        log.info('existing session found, logging in', chatId)
+        session.email = session.email || session._email
+        const result = await loginAndGetNumbers(session, count, chatId, onProgress)
+        session.token = result.token
+        session.numbers = result.numbers
+        pollPage = result.page
+        sessions[chatId] = session
+        log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
+      }
+
+      await stopPolling(chatId)
+
+      const numList = session.numbers.map(n => `+48 ${n.number}`).join('\n')
+      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
+        `Your numbers ${session.numbers.length}:\n${numList}\n\nMonitoring for incoming SMS`
+      ).catch(() => {})
+
+      await startPolling(chatId, session, pollPage)
+      printState()
+    } catch (e) {
+      log.error(`error: ${e.message}`, chatId)
+      try {
+        await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
+      } catch {}
+    } finally {
+      delete processing[chatId]
+    }
+  })()
 }
 
 if (!isTest) {
@@ -676,8 +714,10 @@ bot.action('settings_testproxy', async (ctx) => {
 
 bot.action('settings_proxy', async (ctx) => {
   await ctx.answerCbQuery()
+  const proxy = getProxy()
+  const currentInfo = proxy ? `Current: ${proxy.server}` : 'No proxy set'
   pendingProxy[ctx.chat.id] = true
-  await ctx.editMessageText('Send proxy URL in format:\nhttp://user:pass@host:port')
+  await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`)
 })
 
 bot.action('settings_status', async (ctx) => {
@@ -742,13 +782,13 @@ process.on('SIGTERM', async () => {
     const found = Object.values(sessions).find(s => s.email === testEmail)
     if (!found) throw new Error(`No saved session for ${testEmail}`)
     log.info(`using existing session for ${testEmail}`, chatId)
-    const result = await loginAndGetNumbers({ ...found, chatId }, count, chatId)
+    const result = await loginAndGetNumbers({ ...found, chatId }, count, chatId, null)
     session = { ...found, ...result, chatId }
     pollPage = result.page
   } else {
     const email = testEmail || `${rand(8)}@kilolabs.space`
     log.info(`email: ${email}`, chatId)
-    const result = await registerAndGetNumbers(count, chatId)
+    const result = await registerAndGetNumbers(count, chatId, null)
     session = { email, password: DEFAULT_PASSWORD, token: result.token, numbers: result.numbers, chatId }
     pollPage = result.page
     sessions[chatId] = session
