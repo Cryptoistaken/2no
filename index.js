@@ -8,17 +8,73 @@ import { fileURLToPath } from 'node:url'
 import chalk from 'chalk'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const ENV_FILE = path.join(__dirname, '.env')
+const DATA_FILE = path.join(__dirname, 'data.json')
+
+function loadEnv() {
+  if (!fs.existsSync(ENV_FILE)) return
+  for (const line of fs.readFileSync(ENV_FILE, 'utf8').split('\n')) {
+    const m = line.trim().match(/^([^=]+)=(.*)$/)
+    if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
+  }
+}
+loadEnv()
+
+const TG_TOKEN = process.env.TG_TOKEN
+const MULTIBOT_KEY = process.env.MULTIBOT_KEY
+const DEFAULT_PASSWORD = process.env.DEFAULT_PASSWORD || 'Abuhider123@@@'
+const AUTH_USERS = (process.env.AUTHORIZED_USERS || '').split(',').map(Number).filter(Boolean)
+const AUTHORIZED_USERS = new Set(AUTH_USERS)
+const MAX_NUMBERS_PER_ACCOUNT = 3
+
+if (!TG_TOKEN) { console.error('TG_TOKEN missing in .env'); process.exit(1) }
+if (!MULTIBOT_KEY) { console.error('MULTIBOT_KEY missing in .env'); process.exit(1) }
+if (AUTHORIZED_USERS.size === 0) { console.error('AUTHORIZED_USERS missing in .env'); process.exit(1) }
 
 const API = 'https://2no.pl'
 const KILOMAIL_API = 'https://kilomail.vercel.app/api'
 const TURNSTILE_SITEKEY = '0x4AAAAAAAh6YYTPTzEcN3Ep'
-const MULTIBOT_KEY = process.env.MULTIBOT_KEY || 'w0w8mPygHI6debcLL2UAqq35otYn234X'
-const DEFAULT_PASSWORD = 'Abuhider123@@@'
-const AUTHORIZED_USERS = new Set([1772093705, 8447133985])
-const PROXY = { server: 'http://change4.owlproxy.com:7778', username: 'W4FMnPWKP050_custom_zone_ve', password: '3185836' }
-const TG_TOKEN = process.env.TG_TOKEN || '8536889060:AAGCmUGiKtie1rV2ei0XswyceGuFV2CKHVQ'
-const CONFIG_FILE = path.join(__dirname, 'config.json')
-const MAX_NUMBERS_PER_ACCOUNT = 3
+
+let data = { proxy: null, users: {} }
+if (fs.existsSync(DATA_FILE)) {
+  try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) } catch {}
+}
+if (!data.users) data.users = {}
+if (!data.proxy) data.proxy = null
+
+function saveData() { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)) }
+
+function getProxy() { return data.proxy }
+
+function parseProxyUrl(str) {
+  try {
+    const url = new URL(str)
+    if (!url.hostname || !url.port) return null
+    const proto = url.protocol.replace(':', '')
+    const server = `${proto}://${url.hostname}:${url.port}`
+    const result = { server }
+    if (url.username) result.username = decodeURIComponent(url.username)
+    if (url.password) result.password = decodeURIComponent(url.password)
+    return result
+  } catch {
+    return null
+  }
+}
+
+async function testProxy(proxy) {
+  let browser
+  try {
+    browser = await chromium.launch({ headless: true, proxy, args: ['--no-sandbox'] })
+    const page = await browser.newPage()
+    await page.goto('https://httpbin.org/ip', { timeout: 15000 })
+    await page.close()
+    return true
+  } catch {
+    return false
+  } finally {
+    if (browser) try { await browser.close() } catch {}
+  }
+}
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
@@ -32,18 +88,12 @@ const testCountIdx = process.argv.indexOf('--count')
 const testCount = testCountIdx >= 0 ? parseInt(process.argv[testCountIdx + 1], 10) : MAX_NUMBERS_PER_ACCOUNT
 
 const sessions = {}
-
-let config = {}
-if (fs.existsSync(CONFIG_FILE)) {
-  config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
-}
-function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)) }
-
 const pollTimers = {}
 const pollBrowsers = {}
 const seenMessages = {}
 const processing = {}
 const reAuthLocks = {}
+const pendingProxy = {}
 
 function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
@@ -54,6 +104,37 @@ const log = {
   success: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
   error: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
   warning: (msg, tag) => console.log(tag != null ? `${chalk.cyan(String(tag))} ${chalk.white(msg)}` : chalk.white(msg)),
+}
+
+function userStats(chatId) {
+  if (!data.users[chatId]) {
+    data.users[chatId] = { defaultNumbers: 3, captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0, numbers: [], messages: [] }
+    saveData()
+  }
+  return data.users[chatId]
+}
+
+function mainMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Get Number', 'get_number')],
+    [Markup.button.callback('Settings', 'settings')],
+  ])
+}
+
+function settingsMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Set Proxy', 'settings_proxy'), Markup.button.callback('Test Proxy', 'settings_testproxy')],
+    [Markup.button.callback('Status', 'settings_status')],
+    [Markup.button.callback('Number Count', 'settings_count')],
+    [Markup.button.callback('Back', 'settings_back')],
+  ])
+}
+
+function countMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('1', 'set_count_1'), Markup.button.callback('2', 'set_count_2'), Markup.button.callback('3', 'set_count_3')],
+    [Markup.button.callback('Back', 'settings')],
+  ])
 }
 
 async function solveTurnstile(sitekey, pageurl) {
@@ -104,13 +185,15 @@ async function browserEvalAuth(page, token, body) {
 }
 
 async function launchBrowser() {
-  const browser = await chromium.launch({ headless: false, proxy: PROXY })
+  const proxy = getProxy()
+  const opts = proxy ? { headless: false, proxy } : { headless: false }
+  const browser = await chromium.launch(opts)
   const page = await browser.newPage()
   await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded' })
   return { browser, page }
 }
 
-function createCaptchaSolver(getPageUrl) {
+function createCaptchaSolver(getPageUrl, chatId) {
   const queue = []
   let solving = false
 
@@ -123,6 +206,11 @@ function createCaptchaSolver(getPageUrl) {
         try {
           const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
           entry.resolve(token)
+          if (chatId) {
+            const st = userStats(chatId)
+            st.captchaSolved = (st.captchaSolved || 0) + 1
+            saveData()
+          }
         } catch (e) {
           entry.reject(e)
         }
@@ -144,22 +232,22 @@ function createCaptchaSolver(getPageUrl) {
   }
 }
 
-async function buyNumbers(page, token, count, solver, logTag) {
+async function buyNumbers(page, token, count, solver, chatId) {
   const bought = []
   for (let i = 0; i < count; i++) {
-    log.info(`buying number ${i + 1}/${count}`, logTag)
+    log.info(`buying number ${i + 1}/${count}`, chatId)
 
     const avail = await browserEvalAuth(page, token, { id: 310 })
     if (!avail.result || !avail.result.length) {
-      log.warning(`no numbers available for purchase ${i + 1}, stopping`, logTag)
+      log.warning(`no numbers available for purchase ${i + 1}, stopping`, chatId)
       break
     }
     const toBuy = avail.result[0]
-    log.info(`available: ${toBuy.number} id ${toBuy.id}`, logTag)
+    log.info(`available: ${toBuy.number} id ${toBuy.id}`, chatId)
 
-    log.info('waiting for captcha token', logTag)
+    log.info('waiting for captcha token', chatId)
     const captchaToken = await solver.queueCaptcha()
-    log.info('captcha ready, buying', logTag)
+    log.info('captcha ready, buying', chatId)
 
     const buyRes = await browserEvalAuth(page, token, {
       id: 301,
@@ -172,11 +260,19 @@ async function buyNumbers(page, token, count, solver, logTag) {
       },
     })
     if (!buyRes.success) {
-      log.error(`buy ${i + 1} failed: ${JSON.stringify(buyRes)}`, logTag)
+      log.error(`buy ${i + 1} failed: ${JSON.stringify(buyRes)}`, chatId)
       break
     }
-    log.success(`number ${i + 1} purchased: ${toBuy.number}`, logTag)
+    log.success(`number ${i + 1} purchased: ${toBuy.number}`, chatId)
     bought.push({ number: toBuy.number, number_id: toBuy.id })
+
+    if (chatId) {
+      const st = userStats(chatId)
+      st.numbersGenerated = (st.numbersGenerated || 0) + 1
+      if (!st.numbers) st.numbers = []
+      st.numbers.push({ number: toBuy.number, number_id: toBuy.id, purchasedAt: new Date().toISOString() })
+      saveData()
+    }
 
     if (i + 1 < count) {
       solver.queueCaptcha()
@@ -185,30 +281,30 @@ async function buyNumbers(page, token, count, solver, logTag) {
   return bought
 }
 
-async function registerAndGetNumbers(count, logTag) {
+async function registerAndGetNumbers(count, chatId) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const email = `${rand(8)}@kilolabs.space`
     const password = DEFAULT_PASSWORD
-    log.info(`registration attempt ${attempt + 1} with email ${email}`, logTag)
+    log.info(`registration attempt ${attempt + 1} with email ${email}`, chatId)
     const { browser, page } = await launchBrowser()
 
     const closeBrowser = () => { try { browser.close() } catch {} }
 
-    const solver = createCaptchaSolver(() => page.url())
+    const solver = createCaptchaSolver(() => page.url(), chatId)
     solver.queueCaptcha()
 
     const reg = await browserEval(page, { id: 103, query: { email, password } })
     if (!reg.success) {
-      log.error(`registration failed for ${email}: ${JSON.stringify(reg)}`, logTag)
+      log.error(`registration failed for ${email}: ${JSON.stringify(reg)}`, chatId)
       closeBrowser()
       if (reg.error === 'EmailExists') continue
       throw new Error(`register failed: ${JSON.stringify(reg)}`)
     }
-    log.success(`account created: ${email}`, logTag)
+    log.success(`account created: ${email}`, chatId)
 
     solver.queueCaptcha()
 
-    log.info('waiting for verification email', logTag)
+    log.info('waiting for verification email', chatId)
     let msg = null
     const deadline = Date.now() + 90000
     while (Date.now() < deadline) {
@@ -216,29 +312,29 @@ async function registerAndGetNumbers(count, logTag) {
       if (Array.isArray(inbox) && inbox.length) { msg = inbox[0]; break }
       await sleep(2000)
     }
-    if (!msg) { log.warning('verification email not received', logTag); closeBrowser(); continue }
-    log.success(`verification email arrived: ${msg.subject}`, logTag)
+    if (!msg) { log.warning('verification email not received', chatId); closeBrowser(); continue }
+    log.success(`verification email arrived: ${msg.subject}`, chatId)
 
     const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
     const html = (body && body.html) || ''
     const m = html.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
     const verifyLink = m ? m[0].replace(/&amp;/g, '&') : null
-    if (!verifyLink) { log.warning('no verify link in email', logTag); closeBrowser(); continue }
-    log.info('clicking verify link', logTag)
+    if (!verifyLink) { log.warning('no verify link in email', chatId); closeBrowser(); continue }
+    log.info('clicking verify link', chatId)
 
     await page.goto(verifyLink)
     await page.waitForSelector('button:has-text("Go to login page")', { timeout: 20000 })
     await page.locator('button:has-text("Go to login page")').click()
     await page.waitForTimeout(5000)
 
-    log.info('getting auth token', logTag)
+    log.info('getting auth token', chatId)
     const loginRes = await browserEval(page, { id: 101, query: { email, password } })
     const token = (loginRes && loginRes.token) || ''
-    if (!token) { log.error('failed to get auth token after registration', logTag); closeBrowser(); continue }
-    log.success('auth token obtained', logTag)
+    if (!token) { log.error('failed to get auth token after registration', chatId); closeBrowser(); continue }
+    log.success('auth token obtained', chatId)
 
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
-    const bought = await buyNumbers(page, token, maxBuy, solver, logTag)
+    const bought = await buyNumbers(page, token, maxBuy, solver, chatId)
 
     if (bought.length === 0) { closeBrowser(); continue }
 
@@ -248,35 +344,33 @@ async function registerAndGetNumbers(count, logTag) {
   throw new Error('registration failed after 3 attempts')
 }
 
-async function loginAndGetNumbers(session, count, logTag) {
-  log.info('logging into existing account', logTag)
+async function loginAndGetNumbers(session, count, chatId) {
+  log.info('logging into existing account', chatId)
   const { browser, page } = await launchBrowser()
 
-  const solver = createCaptchaSolver(() => page.url())
+  const solver = createCaptchaSolver(() => page.url(), chatId)
 
   const loginRes = await browserEval(page, { id: 101, query: { email: session.email, password: session.password } })
   const token = (loginRes && loginRes.token) || ''
   if (!token) { await browser.close(); throw new Error('login failed: no token returned') }
-  log.success('login successful', logTag)
+  log.success('login successful', chatId)
 
   const myNums = await browserEvalAuth(page, token, { id: 311 })
   const existing = myNums.result || []
-  log.info(`existing numbers: ${existing.length}`, logTag)
+  log.info(`existing numbers: ${existing.length}`, chatId)
 
   const needCount = Math.max(0, Math.min(count, MAX_NUMBERS_PER_ACCOUNT) - existing.length)
 
   if (needCount === 0) {
-    log.info(`already have ${existing.length} numbers, using existing`, logTag)
-    const n = existing[0]
+    log.info(`already have ${existing.length} numbers, using existing`, chatId)
     await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     return { token, numbers: existing.map(e => ({ number: e.number, number_id: e.number_id })), browser, page }
   }
 
-  log.info(`need to buy ${needCount} more numbers`, logTag)
-
+  log.info(`need to buy ${needCount} more numbers`, chatId)
   solver.queueCaptcha()
 
-  const bought = await buyNumbers(page, token, needCount, solver, logTag)
+  const bought = await buyNumbers(page, token, needCount, solver, chatId)
   const allNumbers = [...existing.map(e => ({ number: e.number, number_id: e.number_id })), ...bought]
 
   await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
@@ -397,6 +491,13 @@ async function startPolling(chatId, session, page) {
         const numTag = num ? `+48 ${num.number}` : ''
 
         log.info(`SMS ${numTag} from ${sender}: ${body.slice(0, 80)}`, chatId)
+
+        const st = userStats(chatId)
+        st.messagesReceived = (st.messagesReceived || 0) + 1
+        if (!st.messages) st.messages = []
+        st.messages.push({ from: sender, body, time, number: numTag, receivedAt: new Date().toISOString() })
+        saveData()
+
         if (typeof bot !== 'undefined') bot.telegram.sendMessage(chatId,
           `${numTag ? numTag + ' ' : ''}From: ${sender}\nMessage: ${body}${time ? `\nTime: ${time}` : ''}`
         ).catch((e) => {
@@ -410,14 +511,14 @@ async function startPolling(chatId, session, page) {
 }
 
 function getUserDefaultNumbers(chatId) {
-  const c = config[chatId]
-  return (c && c.defaultNumbers) || MAX_NUMBERS_PER_ACCOUNT
+  const u = data.users[chatId]
+  return (u && u.defaultNumbers) || MAX_NUMBERS_PER_ACCOUNT
 }
 
 function setUserDefaultNumbers(chatId, count) {
-  if (!config[chatId]) config[chatId] = {}
-  config[chatId].defaultNumbers = count
-  saveConfig()
+  const st = userStats(chatId)
+  st.defaultNumbers = count
+  saveData()
 }
 
 async function processGetNumber(ctx, count) {
@@ -493,18 +594,78 @@ bot.use((ctx, next) => {
 bot.start((ctx) => {
   const chatId = ctx.chat.id
   log.info('bot started by user', chatId)
-  const def = getUserDefaultNumbers(chatId)
-  return ctx.reply(
-    `How many numbers do you need? Default ${def}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback('1', 'set_count_1'),
-        Markup.button.callback('2', 'set_count_2'),
-        Markup.button.callback('3', 'set_count_3'),
-      ],
-      [Markup.button.callback(`Get ${def} Numbers`, 'get_number')]
-    ])
-  )
+  return ctx.reply('Choose an option:', mainMenu())
+})
+
+bot.on('text', async (ctx) => {
+  const chatId = ctx.chat.id
+  if (pendingProxy[chatId]) {
+    delete pendingProxy[chatId]
+    const input = ctx.message.text.trim()
+    const parsed = parseProxyUrl(input)
+    if (!parsed) {
+      return ctx.reply('Invalid proxy format. Use: http://user:pass@host:port')
+    }
+    const ok = await testProxy(parsed)
+    if (!ok) {
+      return ctx.reply('Proxy test failed, address may be invalid or unreachable')
+    }
+    data.proxy = parsed
+    saveData()
+    log.info(`proxy updated to ${parsed.server}`, chatId)
+    return ctx.reply('Proxy updated and working')
+  }
+})
+
+bot.action('settings', async (ctx) => {
+  await ctx.answerCbQuery()
+  await ctx.editMessageText('Settings:', settingsMenu())
+})
+
+bot.action('settings_back', async (ctx) => {
+  await ctx.answerCbQuery()
+  await ctx.editMessageText('Choose an option:', mainMenu())
+})
+
+bot.action('settings_testproxy', async (ctx) => {
+  await ctx.answerCbQuery()
+  const chatId = ctx.chat.id
+  const proxy = getProxy()
+  if (!proxy) {
+    return ctx.reply('No proxy set')
+  }
+  const ok = await testProxy(proxy)
+  if (ok) {
+    return ctx.reply('Proxy is working')
+  }
+  return ctx.reply('Proxy test failed, provide a new one')
+})
+
+bot.action('settings_proxy', async (ctx) => {
+  await ctx.answerCbQuery()
+  pendingProxy[ctx.chat.id] = true
+  await ctx.editMessageText('Send proxy URL in format:\nhttp://user:pass@host:port')
+})
+
+bot.action('settings_status', async (ctx) => {
+  await ctx.answerCbQuery()
+  const chatId = ctx.chat.id
+  const st = userStats(chatId)
+  const nums = (st.numbers || []).map(n => `+48 ${n.number}`).join(', ') || 'none'
+  const lines = [
+    `Captcha solved: ${st.captchaSolved || 0}`,
+    `Numbers generated: ${st.numbersGenerated || 0}`,
+    `Messages received: ${st.messagesReceived || 0}`,
+    `Numbers: ${nums}`,
+  ]
+  await ctx.editMessageText(lines.join('\n'), settingsMenu())
+})
+
+bot.action('settings_count', async (ctx) => {
+  await ctx.answerCbQuery()
+  const chatId = ctx.chat.id
+  const cur = getUserDefaultNumbers(chatId)
+  await ctx.editMessageText(`Current count: ${cur}. Choose new count:`, countMenu())
 })
 
 for (let n = 1; n <= 3; n++) {
@@ -512,12 +673,7 @@ for (let n = 1; n <= 3; n++) {
     const chatId = ctx.chat.id
     setUserDefaultNumbers(chatId, n)
     await ctx.answerCbQuery(`Default set to ${n}`)
-    await ctx.editMessageText(
-      `Default set to ${n} numbers. Tap below to get numbers.`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback(`Get ${n} Numbers`, 'get_number')]
-      ])
-    )
+    await ctx.editMessageText(`Default set to ${n}`, settingsMenu())
   })
 }
 
@@ -544,7 +700,6 @@ process.on('SIGTERM', async () => {
 ;(async () => {
   const chatId = 'test'
   log.info('running in test mode', chatId)
-
   let session, pollPage
   const count = testCount
 
@@ -570,7 +725,6 @@ process.on('SIGTERM', async () => {
   log.info(`polling for SMS for ${testTimeout / 1000}s, press Ctrl+C to stop`, chatId)
 
   await startPolling(chatId, session, pollPage)
-
   await sleep(testTimeout)
   await stopPolling(chatId)
   log.info('test timeout reached', chatId)
