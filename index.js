@@ -750,7 +750,7 @@ async function processGetNumber(ctx, count) {
 
       await stopPolling(chatId)
 
-      const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
+      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
       const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msg.message_id}` }]]
       monitorMessages[chatId] = msg.message_id
       await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
@@ -918,8 +918,8 @@ bot.action(/stop_cancel_(\d+)_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery()
   const session = sessions[chatId]
   if (session && session.numbers.length) {
-    const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
-    const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
+      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
+      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
     await ctx.telegram.editMessageText(chatId, msgId, undefined,
       `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
       { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
@@ -968,8 +968,8 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
     sessions[chatId] = session
     await startPolling(chatId, session, page)
     monitorMessages[chatId] = msgId
-    const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
-    const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
+      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
+      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
     await ctx.telegram.editMessageText(chatId, msgId, undefined,
       `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
       { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
