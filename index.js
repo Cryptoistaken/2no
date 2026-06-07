@@ -687,12 +687,6 @@ async function processGetNumber(ctx, count) {
     await ctx.answerCbQuery('Already processing your request')
     return
   }
-  const lastReq = data.users[chatId]?.lastNumberRequest
-  if (lastReq && Date.now() - lastReq < 7200000) {
-    const wait = Math.ceil((7200000 - (Date.now() - lastReq)) / 60000)
-    await ctx.answerCbQuery(`Wait ${wait}min before requesting new numbers`)
-    return
-  }
   log.info('processing flag set', chatId)
   processing[chatId] = true
   await ctx.answerCbQuery()
@@ -753,10 +747,6 @@ async function processGetNumber(ctx, count) {
       }
 
       await stopPolling(chatId)
-
-      const st = userStats(chatId)
-      st.lastNumberRequest = Date.now()
-      saveData()
 
       const numList = session.numbers.map(n => `<code>+48${n.number}</code>`).join('\n')
       const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msg.message_id}` }]]
