@@ -44,6 +44,7 @@ if (!data.users) data.users = {}
 if (!data.proxy) data.proxy = null
 if (!data.stats) data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
 if (!data.savedSessions) data.savedSessions = {}
+if (!data.oldSessions) data.oldSessions = {}
 
 function saveData() {
   const total = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
@@ -714,39 +715,31 @@ async function processGetNumber(ctx, count) {
 
   ;(async () => {
     try {
-      let session = sessions[chatId]
+      let session
       let pollPage
 
-      if (!session) {
-        log.info('no existing session, starting registration', chatId)
-        const result = await registerAndGetNumbers(count, chatId, onProgress)
-        session = {
-          email: result.email,
-          password: DEFAULT_PASSWORD,
-          token: result.token,
-          numbers: result.numbers,
-          chatId: chatId,
-        }
-        pollPage = result.page
-        sessions[chatId] = session
-        data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
-        userStats(chatId).numbers = result.numbers.map(n => n.number)
-        saveData()
-        log.success(`account created, numbers: ${result.numbers.length}`, chatId)
-      } else {
-        session.chatId = chatId
-        log.info('existing session found, logging in', chatId)
-        session.email = session.email || session._email
-        const result = await loginAndGetNumbers(session, count, chatId, onProgress)
-        session.token = result.token
-        session.numbers = result.numbers
-        pollPage = result.page
-        sessions[chatId] = session
-        data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
-        userStats(chatId).numbers = result.numbers.map(n => n.number)
-        saveData()
-        log.success(`logged in, numbers: ${result.numbers.length}`, chatId)
+      if (data.savedSessions[chatId]) {
+        data.oldSessions[chatId] = { ...data.savedSessions[chatId] }
       }
+      if (sessions[chatId]) {
+        delete sessions[chatId]
+      }
+      saveData()
+
+      const result = await registerAndGetNumbers(count, chatId, onProgress)
+      session = {
+        email: result.email,
+        password: DEFAULT_PASSWORD,
+        token: result.token,
+        numbers: result.numbers,
+        chatId: chatId,
+      }
+      pollPage = result.page
+      sessions[chatId] = session
+      data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+      userStats(chatId).numbers = result.numbers.map(n => n.number)
+      saveData()
+      log.success(`account created, numbers: ${result.numbers.length}`, chatId)
 
       await stopPolling(chatId)
 
@@ -767,14 +760,14 @@ async function processGetNumber(ctx, count) {
         if (proxy) {
           const test = await testProxy(proxy)
           if (!test.ok) {
-            ctx.reply('⚠️ Your proxy is not working. Please update it in Settings → Set Proxy.')
+            ctx.reply('Your proxy is not working. Please update it in Settings - Set Proxy.')
           } else {
-            ctx.reply(`❌ Browser error: ${e.message}`)
+            ctx.reply('Browser error occurred. Check proxy or try again.')
           }
         } else {
-          ctx.reply(`❌ Error: ${e.message}`)
+          ctx.reply('Error occurred. Check proxy or try again.')
         }
-        await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `Error: ${e.message}`)
+        await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Error occurred. Try again.')
       } catch {}
     } finally {
       log.info('processing flag cleared', chatId)
@@ -785,7 +778,8 @@ async function processGetNumber(ctx, count) {
 
 async function resumeSessions() {
   const saved = data.savedSessions || {}
-  const entries = Object.entries(saved)
+  const old = data.oldSessions || {}
+  const entries = [...Object.entries(saved), ...Object.entries(old)]
   if (!entries.length) return
   log.info(`resuming ${entries.length} saved session(s)`)
   for (const [chatId, s] of entries) {
@@ -819,17 +813,20 @@ async function resumeSessions() {
           if (!token) {
             log.error(`resume login failed for ${chatId}`, chatId)
             await browser.close()
-            delete data.savedSessions[chatId]
-            saveData()
-            bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
-            return
-          }
-          const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
-          sessions[chatId] = session
-          await startPolling(chatId, session, page)
-          log.success(`session resumed for ${chatId}`, chatId)
-          printState()
+          delete data.savedSessions[chatId]
+          delete data.oldSessions[chatId]
+          saveData()
+          bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
           return
+        }
+        const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
+        sessions[chatId] = session
+        delete data.oldSessions[chatId]
+        saveData()
+        await startPolling(chatId, session, page)
+        log.success(`session resumed for ${chatId}`, chatId)
+        printState()
+        return
         } catch (e) {
           lastError = e.message
           log.error(`resume attempt ${attempt}/3 failed for ${chatId}: ${e.message}`, chatId)
@@ -838,6 +835,7 @@ async function resumeSessions() {
       }
       log.error(`resume failed for ${chatId} after 3 attempts: ${lastError}`, chatId)
       delete data.savedSessions[chatId]
+      delete data.oldSessions[chatId]
       saveData()
       bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
     })()
@@ -924,7 +922,12 @@ bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
   if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
   await ctx.answerCbQuery('Stopped monitoring')
   await stopPolling(chatId)
-  if (sessions[chatId]) sessions[chatId].numbers = []
+  if (sessions[chatId]) {
+    if (data.savedSessions[chatId]) {
+      data.oldSessions[chatId] = { ...data.savedSessions[chatId] }
+    }
+    sessions[chatId].numbers = []
+  }
   saveData()
   const resumeBtn = [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
   await ctx.telegram.editMessageText(chatId, msgId, undefined,
@@ -957,12 +960,22 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
   const msgId = Number(ctx.match[2])
   if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
   await ctx.answerCbQuery()
-  const session = sessions[chatId]
+  let session = sessions[chatId]
   if (!session || !session.numbers.length) {
-    await ctx.telegram.editMessageText(chatId, msgId, undefined,
-      'No numbers to monitor.'
-    ).catch(() => {})
-    return ctx.reply('Choose an option:', mainMenu())
+    if (data.oldSessions[chatId] && data.oldSessions[chatId].numbers && data.oldSessions[chatId].numbers.length) {
+      session = { ...data.oldSessions[chatId], chatId: Number(chatId) }
+      delete data.oldSessions[chatId]
+      sessions[chatId] = session
+      saveData()
+    } else if (data.savedSessions[chatId] && data.savedSessions[chatId].numbers && data.savedSessions[chatId].numbers.length) {
+      session = { ...data.savedSessions[chatId], chatId: Number(chatId) }
+      sessions[chatId] = session
+    } else {
+      await ctx.telegram.editMessageText(chatId, msgId, undefined,
+        'No numbers to monitor.'
+      ).catch(() => {})
+      return ctx.reply('Choose an option:', mainMenu())
+    }
   }
   const oldest = session.numbers.reduce((min, n) => Math.min(min, n.created_at || Infinity), Infinity) * 1000
   if (oldest && Date.now() - oldest > 86400000) {
