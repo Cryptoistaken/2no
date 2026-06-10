@@ -2,12 +2,11 @@
   "name": "2no-automation",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "login": "node index.js --login"
+    "start": "node index.js"
   },
   "dependencies": {
     "chalk": "^5.6.2",
-    "playwright": "^1.60.0",
+    "ioredis": "^5.11.1",
     "telegraf": "^4.16.3"
   }
 }

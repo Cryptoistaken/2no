@@ -1,6 +1,8 @@
-FROM mcr.microsoft.com/playwright:v1.60.0-noble
+FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y curl xvfb unzip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y nodejs npm ca-certificates && rm -rf /var/lib/apt/lists/* && \
+    pip install tls_client --break-system-packages --no-cache-dir && \
+    ln -sf /usr/bin/python3 /usr/bin/python
 
 WORKDIR /app
 
@@ -9,6 +11,4 @@ RUN npm ci
 
 COPY . ./
 
-ENV DOCKER=1
-
-CMD ["sh", "-c", "xvfb-run -a -s \"-screen 0 1920x1080x24\" node index.js"]
+CMD ["node", "index.js"]
