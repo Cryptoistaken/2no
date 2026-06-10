@@ -10,8 +10,7 @@ import { Redis } from 'ioredis'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ENV_FILE = path.join(__dirname, '..', '..', '.env')
-const DATA_FILE_DIR = process.env.DATA_FILE_DIR || path.join(__dirname, 'data')
-const DATA_FILE = path.join(DATA_FILE_DIR, 'data.json')
+
 
 function loadEnv() {
   if (!fs.existsSync(ENV_FILE)) return
@@ -34,6 +33,7 @@ if (!TG_TOKEN) { console.error('TG_TOKEN missing in .env'); process.exit(1) }
 if (!MULTIBOT_KEY) { console.error('MULTIBOT_KEY missing in .env'); process.exit(1) }
 if (!DEFAULT_PASSWORD) { console.error('DEFAULT_PASSWORD missing in .env'); process.exit(1) }
 if (AUTHORIZED_USERS.size === 0) { console.error('AUTHORIZED_USERS missing in .env'); process.exit(1) }
+if (!REDIS_URL) { console.error('REDIS_URL missing in .env'); process.exit(1) }
 
 const API = 'https://2no.pl'
 const KILOMAIL_API = 'https://kilomail.vercel.app/api'
@@ -101,25 +101,17 @@ let redis = null
 let data = { proxy: null, users: {} }
 
 async function loadData() {
-  if (REDIS_URL) {
-    redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3, retryStrategy: t => Math.min(t * 100, 2000) })
-    redis.on('error', e => log.error(`redis: ${e.message}`))
-    try {
-      const raw = await redis.get(REDIS_KEY)
-      if (raw) {
-        data = JSON.parse(raw)
-        console.log('data loaded from redis')
-        return
-      }
-    } catch (e) {
-      console.warn(`redis load failed: ${e.message}, falling back to file`)
+  if (!REDIS_URL) return
+  redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3, retryStrategy: t => Math.min(t * 100, 2000) })
+  redis.on('error', e => log.error(`redis: ${e.message}`))
+  try {
+    const raw = await redis.get(REDIS_KEY)
+    if (raw) {
+      data = JSON.parse(raw)
+      console.log('data loaded from redis')
     }
-  }
-  if (fs.existsSync(DATA_FILE)) {
-    try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); console.log('data loaded from file') } catch {}
-  }
-  if (redis) {
-    try { await redis.set(REDIS_KEY, JSON.stringify(data)); console.log('file data migrated to redis') } catch {}
+  } catch (e) {
+    console.warn(`redis load failed: ${e.message}`)
   }
 }
 await loadData()
@@ -138,9 +130,7 @@ function saveData() {
     total.messagesReceived += u.messagesReceived || 0
   }
   data.stats = total
-  const json = JSON.stringify(data)
-  fs.writeFileSync(DATA_FILE, json)
-  if (redis) redis.set(REDIS_KEY, json).catch(() => {})
+  if (redis) redis.set(REDIS_KEY, JSON.stringify(data)).catch(() => {})
 }
 
 function getProxy() { return data.proxy }
