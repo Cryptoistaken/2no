@@ -108,18 +108,18 @@ async function loadData() {
       const raw = await redis.get(REDIS_KEY)
       if (raw) {
         data = JSON.parse(raw)
-        log.info('data loaded from redis')
+        console.log('data loaded from redis')
         return
       }
     } catch (e) {
-      log.warning(`redis load failed: ${e.message}, falling back to file`)
+      console.warn(`redis load failed: ${e.message}, falling back to file`)
     }
   }
   if (fs.existsSync(DATA_FILE)) {
-    try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); log.info('data loaded from file') } catch {}
+    try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); console.log('data loaded from file') } catch {}
   }
   if (redis) {
-    try { await redis.set(REDIS_KEY, JSON.stringify(data)); log.info('file data migrated to redis') } catch {}
+    try { await redis.set(REDIS_KEY, JSON.stringify(data)); console.log('file data migrated to redis') } catch {}
   }
 }
 await loadData()
