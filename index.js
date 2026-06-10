@@ -1,15 +1,16 @@
 process.noDeprecation = true
 
 import { Telegraf, Markup } from 'telegraf'
-import { chromium } from 'playwright'
+import { spawn } from 'child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import chalk from 'chalk'
+import { Redis } from 'ioredis'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const ENV_FILE = path.join(__dirname, '.env')
-const DATA_FILE_DIR = process.env.DATA_FILE_DIR || __dirname
+const ENV_FILE = path.join(__dirname, '..', '..', '.env')
+const DATA_FILE_DIR = process.env.DATA_FILE_DIR || path.join(__dirname, 'data')
 const DATA_FILE = path.join(DATA_FILE_DIR, 'data.json')
 
 function loadEnv() {
@@ -23,23 +24,106 @@ loadEnv()
 
 const TG_TOKEN = process.env.TG_TOKEN
 const MULTIBOT_KEY = process.env.MULTIBOT_KEY
-const DEFAULT_PASSWORD = process.env.DEFAULT_PASSWORD || 'Abuhider123@@@'
+const DEFAULT_PASSWORD = process.env.DEFAULT_PASSWORD
 const AUTH_USERS = (process.env.AUTHORIZED_USERS || '').split(',').map(Number).filter(Boolean)
 const AUTHORIZED_USERS = new Set(AUTH_USERS)
 const MAX_NUMBERS_PER_ACCOUNT = 3
+const REDIS_URL = process.env.REDIS_URL
 
 if (!TG_TOKEN) { console.error('TG_TOKEN missing in .env'); process.exit(1) }
 if (!MULTIBOT_KEY) { console.error('MULTIBOT_KEY missing in .env'); process.exit(1) }
+if (!DEFAULT_PASSWORD) { console.error('DEFAULT_PASSWORD missing in .env'); process.exit(1) }
 if (AUTHORIZED_USERS.size === 0) { console.error('AUTHORIZED_USERS missing in .env'); process.exit(1) }
 
 const API = 'https://2no.pl'
 const KILOMAIL_API = 'https://kilomail.vercel.app/api'
 const TURNSTILE_SITEKEY = '0x4AAAAAAAh6YYTPTzEcN3Ep'
+const CF_WORKERS = 4
 
-let data = { proxy: null, users: {} }
-if (fs.existsSync(DATA_FILE)) {
-  try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) } catch {}
+const PYTHON_WORKER = `import sys, json, tls_client
+
+session = tls_client.Session(
+    client_identifier="chrome_120",
+    random_tls_extension_order=True
+)
+
+base_headers = {
+    "accept": "application/json, text/plain, */*",
+    "content-type": "application/json",
+    "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-gpc": "1",
+    "referer": "https://2nd-no.com/",
+    "origin": "https://2nd-no.com/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+for line in sys.stdin:
+    req = None
+    try:
+        req = json.loads(line.strip())
+        headers = {**base_headers, **req.get("headers", {})}
+        body = req.get("body", {})
+
+        proxy = req.get("proxy")
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        else:
+            session.proxies = {}
+
+        method = req.get("method", "POST").upper()
+        url = req.get("url", "https://2no.pl/")
+
+        if method == "GET":
+            resp = session.get(url, headers=headers, timeout_seconds=req.get("timeout", 30))
+        elif method == "POST":
+            resp = session.post(url, json=body, headers=headers, timeout_seconds=req.get("timeout", 30))
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+
+        print(json.dumps({
+            "id": req.get("id"),
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text
+        }, ensure_ascii=False), flush=True)
+    except Exception as e:
+        rid = req.get("id") if req else None
+        print(json.dumps({"id": rid, "error": str(e)}, ensure_ascii=False), flush=True)
+`
+
+const WORKER_SCRIPT = path.join(fs.mkdtempSync('2no-py-'), 'worker.py')
+fs.writeFileSync(WORKER_SCRIPT, PYTHON_WORKER)
+
+const REDIS_KEY = '2no:data'
+let redis = null
+let data = { proxy: null, users: {} }
+
+async function loadData() {
+  if (REDIS_URL) {
+    redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3, retryStrategy: t => Math.min(t * 100, 2000) })
+    redis.on('error', e => log.error(`redis: ${e.message}`))
+    try {
+      const raw = await redis.get(REDIS_KEY)
+      if (raw) {
+        data = JSON.parse(raw)
+        log.info('data loaded from redis')
+        return
+      }
+    } catch (e) {
+      log.warning(`redis load failed: ${e.message}, falling back to file`)
+    }
+  }
+  if (fs.existsSync(DATA_FILE)) {
+    try { data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); log.info('data loaded from file') } catch {}
+  }
+  if (redis) {
+    try { await redis.set(REDIS_KEY, JSON.stringify(data)); log.info('file data migrated to redis') } catch {}
+  }
+}
+await loadData()
+
 if (!data.users) data.users = {}
 if (!data.proxy) data.proxy = null
 if (!data.stats) data.stats = { captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0 }
@@ -54,7 +138,9 @@ function saveData() {
     total.messagesReceived += u.messagesReceived || 0
   }
   data.stats = total
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
+  const json = JSON.stringify(data)
+  fs.writeFileSync(DATA_FILE, json)
+  if (redis) redis.set(REDIS_KEY, json).catch(() => {})
 }
 
 function getProxy() { return data.proxy }
@@ -74,23 +160,6 @@ function parseProxyUrl(str) {
   }
 }
 
-async function testProxy(proxy) {
-  let browser
-  try {
-    browser = await chromium.launch({ headless: true, proxy, args: ['--no-sandbox'] })
-    const page = await browser.newPage()
-    log.info('testing proxy, fetching IP', 'PROXY')
-    const resp = await page.goto('https://httpbin.org/ip', { timeout: 15000 })
-    const json = await resp.json()
-    await page.close()
-    return { ok: true, ip: json.origin }
-  } catch {
-    return { ok: false }
-  } finally {
-    if (browser) try { await browser.close() } catch {}
-  }
-}
-
 function printState() {
   const proxy = getProxy()
   const proxyInfo = proxy ? `${proxy.username ? proxy.server.replace('://', `://${proxy.username}:${proxy.password}@`) : proxy.server}` : 'none'
@@ -102,7 +171,7 @@ function printState() {
   for (const [id, u] of Object.entries(data.users)) {
     let state = 'idle'
     if (processing[id]) state = 'getting numbers'
-    else if (pollBrowsers[id]) state = 'polling'
+    else if (pollingSessions[id]) state = 'polling'
     const nums = (u.numbers || []).length
     log.info(`${id} ${state} ${nums} numbers`, 'USER')
   }
@@ -111,18 +180,9 @@ function printState() {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
-const isTest = process.argv.includes('--test')
-const testEmailIdx = process.argv.indexOf('--email')
-const testEmail = testEmailIdx >= 0 ? process.argv[testEmailIdx + 1] : null
-const testTimeoutIdx = process.argv.indexOf('--timeout')
-const testTimeout = testTimeoutIdx >= 0 ? parseInt(process.argv[testTimeoutIdx + 1], 10) * 1000 : 300000
-const testLogin = process.argv.includes('--login')
-const testCountIdx = process.argv.indexOf('--count')
-const testCount = testCountIdx >= 0 ? parseInt(process.argv[testCountIdx + 1], 10) : MAX_NUMBERS_PER_ACCOUNT
-
 const sessions = {}
 const pollTimers = {}
-const pollBrowsers = {}
+const pollingSessions = {}
 const seenMessages = {}
 const processing = {}
 const monitorMessages = {}
@@ -130,6 +190,108 @@ const autoStopTimers = {}
 const reAuthLocks = {}
 const pendingProxy = {}
 const pendingImport = {}
+
+// --- CfClient: Python TLS worker pool ---
+
+class CfClient {
+  constructor(workerCount = 4) {
+    this.workers = []
+    this.pending = new Map()
+    this.counter = 0
+    for (let i = 0; i < workerCount; i++) this._spawn()
+  }
+
+  _spawn() {
+    const proc = spawn('python', [WORKER_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } })
+    proc.on('error', () => {})
+    let buf = ''
+    proc.stdout.on('data', c => {
+      buf += c.toString()
+      const ls = buf.split('\n')
+      buf = ls.pop()
+      for (const l of ls) {
+        if (!l.trim()) continue
+        try {
+          const r = JSON.parse(l)
+          const e = this.pending.get(r.id)
+          if (e) { this.pending.delete(r.id); e.resolve(r) }
+        } catch (_) {}
+      }
+    })
+    proc.stderr.on('data', () => {})
+    proc.on('exit', () => setTimeout(() => this._spawn(), 1000))
+    this.workers.push(proc)
+  }
+
+  _workerIndex(key) {
+    if (!key) return this.counter++ % this.workers.length
+    let h = 5381
+    for (let i = 0; i < key.length; i++) h = ((h << 5) + h + key.charCodeAt(i)) | 0
+    return Math.abs(h) % this.workers.length
+  }
+
+  request(url, body, opts = {}) {
+    const id = Date.now() + Math.random()
+    return new Promise((res, rej) => {
+      this.pending.set(id, { resolve: res })
+      const msg = JSON.stringify({
+        id, url, body, method: opts.method || 'POST',
+        proxy: opts.proxy || null,
+        headers: opts.headers || {},
+        timeout: opts.timeout || 30
+      }) + '\n'
+      this.workers[this._workerIndex(opts.sticky)].stdin.write(msg)
+      setTimeout(() => {
+        if (this.pending.has(id)) { this.pending.delete(id); rej(new Error('Timeout')) }
+      }, (opts.timeout || 30) * 1000 + 5000)
+    })
+  }
+
+  close() { for (const w of this.workers) w.kill() }
+}
+
+const cfClient = new CfClient(CF_WORKERS)
+
+async function cfRequest(body, sticky) {
+  const resp = await cfClient.request(API, body, { sticky })
+  if (resp.error) throw new Error(`cfRequest error: ${resp.error}`)
+  return JSON.parse(resp.body)
+}
+
+async function cfRequestAuth(token, body, sticky) {
+  const resp = await cfClient.request(API, body, { headers: { 'x-auth-token': token }, sticky })
+  if (resp.error) throw new Error(`cfRequestAuth error: ${resp.error}`)
+  return JSON.parse(resp.body)
+}
+
+function proxyString() {
+  const p = getProxy()
+  if (!p) return null
+  return p.username ? `${p.server.replace('://', `://${p.username}:${p.password}@`)}` : p.server
+}
+
+function cfOpts(extra = {}) {
+  const proxy = proxyString()
+  return proxy ? { ...extra, proxy } : extra
+}
+
+async function cfRequestProxied(body, sticky) {
+  const resp = await cfClient.request(API, body, { ...cfOpts(), sticky })
+  if (resp.error) throw new Error(`cfRequestProxied error: ${resp.error}`)
+  return JSON.parse(resp.body)
+}
+
+async function testProxyViaCf() {
+  const proxy = proxyString()
+  if (!proxy) return { ok: false }
+  try {
+    const resp = await cfClient.request('https://httpbin.org/ip', {}, { method: 'GET', proxy })
+    const data = JSON.parse(resp.body)
+    return { ok: true, ip: data.origin }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
 
 function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
@@ -165,7 +327,7 @@ function settingsMenu() {
     [Markup.button.callback('Status', 'settings_status')],
     [Markup.button.callback('Number Count', 'settings_count')],
     [Markup.button.callback('Data', 'settings_data')],
-    [Markup.button.callback('Back', 'settings_back')],
+    [Markup.button.callback('Back', 'main')],
   ])
 }
 
@@ -183,6 +345,35 @@ function countMenu(current) {
     [btn(1), btn(2), btn(3)],
     [Markup.button.callback('Back', 'settings')],
   ])
+}
+
+function buildNumList(numbers) {
+  return numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
+}
+
+function stopKeyboard(chatId, msgId) {
+  return [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
+}
+
+function resumeKeyboard(chatId, msgId) {
+  return [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
+}
+
+function monitorMessageText(session) {
+  return `<b>Your numbers ${session.numbers.length}:</b>\n${buildNumList(session.numbers)}\n\nMonitoring for incoming SMS`
+}
+
+async function editMonitorMessage(botOrCtx, chatId, msgId, session) {
+  await botOrCtx.telegram.editMessageText(chatId, msgId, undefined, monitorMessageText(session), {
+    parse_mode: 'HTML', reply_markup: { inline_keyboard: stopKeyboard(chatId, msgId) }
+  }).catch(() => {})
+}
+
+async function editStoppedMessage(botOrCtx, chatId, msgId) {
+  await botOrCtx.telegram.editMessageText(chatId, msgId, undefined,
+    '<b>Monitoring stopped</b>\n\nClick Resume to continue monitoring.',
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: resumeKeyboard(chatId, msgId) } }
+  ).catch(() => {})
 }
 
 async function solveTurnstile(sitekey, pageurl) {
@@ -211,46 +402,7 @@ async function solveTurnstile(sitekey, pageurl) {
   throw new Error('captcha solving timed out after 3 minutes')
 }
 
-async function browserEval(page, body) {
-  return page.evaluate(async ({ url, body }) => {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    return r.json()
-  }, { url: API, body })
-}
-
-async function browserEvalAuth(page, token, body) {
-  return page.evaluate(async ({ url, token, body }) => {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-auth-token': token },
-      body: JSON.stringify(body),
-    })
-    return r.json()
-  }, { url: API, token, body })
-}
-
-async function launchBrowser() {
-  const proxy = getProxy()
-  const proxyInfo = proxy ? `${proxy.server}` : 'none'
-  log.info(`launching browser, proxy ${proxyInfo}`, 'BROWSER')
-  try {
-    const opts = proxy ? { headless: false, proxy } : { headless: false }
-    const browser = await chromium.launch(opts)
-    const page = await browser.newPage()
-    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded' })
-    log.success('browser ready', 'BROWSER')
-    return { browser, page }
-  } catch (e) {
-    if (proxy) log.error(`proxy failed: ${e.message}`, 'PROXY')
-    throw e
-  }
-}
-
-function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
+function createCaptchaSolver(chatId, maxConcurrent = 2) {
   const queue = []
   let active = 0
   const CAPTCHA_TTL = 250000
@@ -259,7 +411,7 @@ function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
     active++
     log.info(`captcha solving started, ${queue.length} queued, ${active} active`, chatId)
     try {
-      const token = await solveTurnstile(TURNSTILE_SITEKEY, getPageUrl())
+      const token = await solveTurnstile(TURNSTILE_SITEKEY, 'https://2nd-no.com/')
       entry.resolve({ token, solvedAt: Date.now() })
       if (chatId) {
         const st = userStats(chatId)
@@ -306,13 +458,13 @@ function createCaptchaSolver(getPageUrl, chatId, maxConcurrent = 2) {
   }
 }
 
-async function buyNumbers(page, token, count, solver, captchaPromises, chatId, onProgress) {
+async function buyNumbers(token, count, solver, captchaPromises, chatId, onProgress, sticky) {
   const bought = []
   for (let i = 0; i < count; i++) {
     log.info(`buying number ${i + 1}/${count}`, chatId)
     if (onProgress) onProgress('progress', `Buying number ${i + 1}/${count}`)
 
-    const avail = await browserEvalAuth(page, token, { id: 310 })
+    const avail = await cfRequestAuth(token, { id: 310 }, sticky)
     if (!avail.result || !avail.result.length) {
       log.warning(`no numbers available for purchase ${i + 1}, stopping`, chatId)
       break
@@ -324,7 +476,7 @@ async function buyNumbers(page, token, count, solver, captchaPromises, chatId, o
     const validToken = Date.now() - solvedAt > 250000 ? await solver.getValidToken() : captchaToken
     log.info('captcha ready, buying', chatId)
 
-    const buyRes = await browserEvalAuth(page, token, {
+    const buyRes = await cfRequestAuth(token, {
       id: 301,
       query: {
         number_id: toBuy.id, name: '', color: '#4893EC',
@@ -333,7 +485,7 @@ async function buyNumbers(page, token, count, solver, captchaPromises, chatId, o
         right_to_transfer_number: true, marketing: false,
         response_key: validToken,
       },
-    })
+    }, sticky)
     if (!buyRes.success) {
       log.error(`buy ${i + 1} failed: ${JSON.stringify(buyRes)}`, chatId)
       break
@@ -360,17 +512,13 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
     const password = DEFAULT_PASSWORD
     log.info(`registration attempt ${attempt + 1} with email ${email}`, chatId)
     if (onProgress) onProgress('progress', `Creating account attempt ${attempt + 1} of 3`)
-    const { browser, page } = await launchBrowser()
 
-    const closeBrowser = () => { log.info('closing browser', chatId); try { browser.close() } catch {} }
-
-    const solver = createCaptchaSolver(() => page.url(), chatId, count)
+    const solver = createCaptchaSolver(chatId, count)
     const captchaPromises = solver.preQueue(count)
 
-    const reg = await browserEval(page, { id: 103, query: { email, password } })
+    const reg = await cfRequestProxied({ id: 103, query: { email, password } }, email)
     if (!reg.success) {
       log.error(`registration failed for ${email}: ${JSON.stringify(reg)}`, chatId)
-      closeBrowser()
       if (reg.error === 'EmailExists') continue
       throw new Error(`register failed: ${JSON.stringify(reg)}`)
     }
@@ -385,37 +533,40 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
       if (Array.isArray(inbox) && inbox.length) { msg = inbox[0]; break }
       await sleep(2000)
     }
-    if (!msg) { log.warning('verification email not received', chatId); closeBrowser(); continue }
+    if (!msg) { log.warning('verification email not received', chatId); continue }
     log.success(`verification email arrived: ${msg.subject}`, chatId)
     if (onProgress) onProgress('progress', 'Verification email received, verifying')
 
     log.info('fetching email body', chatId)
     const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
     const html = (body && body.html) || ''
+    const text = (body && body.text) || ''
     const m = html.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
-    const verifyLink = m ? m[0].replace(/&amp;/g, '&') : null
-    if (!verifyLink) { log.warning('no verify link in email', chatId); closeBrowser(); continue }
-    log.info('clicking verify link', chatId)
-    if (onProgress) onProgress('progress', 'Clicking verification link')
+    const m2 = text.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
+    const verifyLink = m ? m[0].replace(/&amp;/g, '&') : (m2 ? m2[0].replace(/&amp;/g, '&') : null)
+    if (!verifyLink) { log.warning('no verify link in email', chatId); continue }
+    log.info('calling confirm API', chatId)
 
-    log.info('navigating to verify link', chatId)
-    await page.goto(verifyLink)
-    log.info('page loaded, clicking login button', chatId)
-    await page.waitForSelector('button:has-text("Go to login page")', { timeout: 20000 })
-    await page.locator('button:has-text("Go to login page")').click()
-    await page.waitForTimeout(5000)
+    const urlParams = Object.fromEntries(new URL(verifyLink).searchParams)
+    const confirmRes = await cfRequestProxied({ id: 104, query: { email: urlParams.email || email, token: urlParams.token } }, email)
+    if (!confirmRes.success) {
+      log.error(`confirm failed: ${JSON.stringify(confirmRes)}`, chatId)
+      continue
+    }
+    log.success('account confirmed', chatId)
+    if (onProgress) onProgress('progress', 'Account confirmed, logging in')
 
     log.info('getting auth token', chatId)
     if (onProgress) onProgress('progress', 'Getting auth token')
-    const loginRes = await browserEval(page, { id: 101, query: { email, password } })
+    const loginRes = await cfRequestProxied({ id: 101, query: { email, password } }, email)
     const token = (loginRes && loginRes.token) || ''
-    if (!token) { log.error('failed to get auth token after registration', chatId); closeBrowser(); continue }
+    if (!token) { log.error('failed to get auth token after registration', chatId); continue }
     log.success('auth token obtained', chatId)
 
     const maxBuy = Math.min(count, MAX_NUMBERS_PER_ACCOUNT)
-    const bought = await buyNumbers(page, token, maxBuy, solver, captchaPromises, chatId, onProgress)
+    const bought = await buyNumbers(token, maxBuy, solver, captchaPromises, chatId, onProgress, email)
 
-    if (bought.length === 0) { log.warning('no numbers bought, retrying', chatId); closeBrowser(); continue }
+    if (bought.length === 0) { log.warning('no numbers bought, retrying', chatId); continue }
 
     log.success(`registration complete, ${bought.length} numbers`, chatId)
     if (chatId) {
@@ -424,8 +575,7 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
       st.emails.push({ email, createdAt: new Date().toISOString() })
       saveData()
     }
-    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-    return { email, password, token, numbers: bought, browser, page }
+    return { email, password, token, numbers: bought }
   }
   throw new Error('registration failed after 3 attempts')
 }
@@ -434,18 +584,18 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
   log.info('logging into existing account', chatId)
   log.info(`email ${session.email}`, chatId)
   if (onProgress) onProgress('progress', 'Logging in')
-  const { browser, page } = await launchBrowser()
 
-  const solver = createCaptchaSolver(() => page.url(), chatId, count)
+  const sticky = session.email
+  const solver = createCaptchaSolver(chatId, count)
 
   log.info('performing login', chatId)
-  const loginRes = await browserEval(page, { id: 101, query: { email: session.email, password: session.password } })
+  const loginRes = await cfRequestProxied({ id: 101, query: { email: session.email, password: session.password } }, sticky)
   const token = (loginRes && loginRes.token) || ''
-  if (!token) { log.error('login failed: no token returned', chatId); await browser.close(); throw new Error('login failed: no token returned') }
+  if (!token) { log.error('login failed: no token returned', chatId); throw new Error('login failed: no token returned') }
   log.success('login successful', chatId)
   if (onProgress) onProgress('progress', 'Login successful, checking numbers')
 
-  const myNums = await browserEvalAuth(page, token, { id: 311 })
+  const myNums = await cfRequestAuth(token, { id: 311 }, sticky)
   const existing = myNums.result || []
   log.info(`existing numbers: ${existing.length}`, chatId)
 
@@ -454,23 +604,21 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
   if (needCount === 0) {
     log.info(`already have ${existing.length} numbers, using existing`, chatId)
     if (onProgress) onProgress('progress', 'Using existing numbers')
-    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
     const numbers = existing.map(e => ({ number: e.number, number_id: e.number_id }))
     if (onProgress) {
       for (const n of numbers) onProgress('number', `+48 ${n.number}`)
     }
-    return { token, numbers, browser, page }
+    return { token, numbers }
   }
 
   log.info(`need to buy ${needCount} more numbers`, chatId)
   if (onProgress) onProgress('progress', `Need to buy ${needCount} more numbers`)
   const captchaPromises = solver.preQueue(needCount)
 
-  const bought = await buyNumbers(page, token, needCount, solver, captchaPromises, chatId, onProgress)
+  const bought = await buyNumbers(token, needCount, solver, captchaPromises, chatId, onProgress, sticky)
   const allNumbers = [...existing.map(e => ({ number: e.number, number_id: e.number_id })), ...bought]
 
-  await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-  return { token, numbers: allNumbers, browser, page }
+  return { token, numbers: allNumbers }
 }
 
 async function stopPolling(chatId) {
@@ -479,11 +627,7 @@ async function stopPolling(chatId) {
     clearInterval(pollTimers[chatId])
     delete pollTimers[chatId]
   }
-  if (pollBrowsers[chatId]) {
-    log.info('closing poll browser', chatId)
-    try { await pollBrowsers[chatId].browser.close() } catch {}
-    delete pollBrowsers[chatId]
-  }
+  delete pollingSessions[chatId]
   if (autoStopTimers[chatId]) {
     clearTimeout(autoStopTimers[chatId])
     delete autoStopTimers[chatId]
@@ -491,30 +635,8 @@ async function stopPolling(chatId) {
   printState()
 }
 
-async function pollApi(page, token, body) {
-  try {
-    return await page.evaluate(async ({ url, token, body }) => {
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-auth-token': token },
-        body: JSON.stringify(body),
-      })
-      return r.json()
-    }, { url: API, token, body })
-  } catch (e) {
-    if (e.message && e.message.includes('Execution context was destroyed')) {
-      await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-      return await page.evaluate(async ({ url, token, body }) => {
-        const r = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-auth-token': token },
-          body: JSON.stringify(body),
-        })
-        return r.json()
-      }, { url: API, token, body })
-    }
-    throw e
-  }
+async function pollApi(token, body) {
+  return cfRequestAuth(token, body)
 }
 
 function detectSender(body) {
@@ -553,10 +675,10 @@ function detectSender(body) {
   return 'unknown'
 }
 
-async function startPolling(chatId, session, page) {
+async function startPolling(chatId, session) {
   await stopPolling(chatId)
   seenMessages[chatId] = new Set()
-  pollBrowsers[chatId] = { browser: page.context().browser(), page }
+  pollingSessions[chatId] = true
 
   log.info(`started SMS polling for +48 ${session.numbers.map(n => n.number).join(', ')}`, chatId)
 
@@ -564,7 +686,7 @@ async function startPolling(chatId, session, page) {
   pollTimers[chatId] = setInterval(async () => {
     pollCount++
     try {
-      const msgs = await pollApi(page, session.token, {
+      const msgs = await pollApi(session.token, {
         id: 414,
         query: { offset: 0, limit: 10, order_by: [{ field: 'created_at', order: 'DESC' }] },
       })
@@ -574,31 +696,8 @@ async function startPolling(chatId, session, page) {
         if (reAuthLocks[chatId]) { return }
         reAuthLocks[chatId] = true
         try {
-          let newToken
-          try {
-            newToken = await page.evaluate(async ({ url, email, password }) => {
-              const r = await fetch(url, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ id: 101, query: { email, password } }),
-              })
-              const data = await r.json()
-              return data.token || null
-            }, { url: API, email: session.email, password: session.password })
-          } catch (ctxErr) {
-            if (ctxErr.message && ctxErr.message.includes('Execution context was destroyed')) {
-              await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-              newToken = await page.evaluate(async ({ url, email, password }) => {
-                const r = await fetch(url, {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ id: 101, query: { email, password } }),
-                })
-                const data = await r.json()
-                return data.token || null
-              }, { url: API, email: session.email, password: session.password })
-            } else { throw ctxErr }
-          }
+          const loginRes = await cfRequestProxied({ id: 101, query: { email: session.email, password: session.password } }, session.email)
+          const newToken = (loginRes && loginRes.token) || null
           if (!newToken) throw new Error('re-login failed')
           session.token = newToken
           sessions[chatId] = session
@@ -661,11 +760,7 @@ async function startPolling(chatId, session, page) {
     stopPolling(chatId)
     const msgId = monitorMessages[chatId]
     if (msgId) {
-      const resumeBtn = [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
-      bot.telegram.editMessageText(chatId, msgId, undefined,
-        '<b>Monitoring auto-stopped (2h limit)</b>\n\nClick Resume to continue monitoring.',
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: resumeBtn } }
-      ).catch(() => {})
+      editStoppedMessage(bot, chatId, msgId)
     }
     printState()
   }, 7200000)
@@ -716,7 +811,6 @@ async function processGetNumber(ctx, count) {
   ;(async () => {
     try {
       let session
-      let pollPage
 
       if (data.savedSessions[chatId]) {
         data.oldSessions[chatId] = { ...data.savedSessions[chatId] }
@@ -734,7 +828,6 @@ async function processGetNumber(ctx, count) {
         numbers: result.numbers,
         chatId: chatId,
       }
-      pollPage = result.page
       sessions[chatId] = session
       data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
       userStats(chatId).numbers = result.numbers.map(n => n.number)
@@ -743,30 +836,15 @@ async function processGetNumber(ctx, count) {
 
       await stopPolling(chatId)
 
-      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
-      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msg.message_id}` }]]
       monitorMessages[chatId] = msg.message_id
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined,
-        `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
-      ).catch(() => {})
+      await editMonitorMessage(ctx, chatId, msg.message_id, session)
 
-      await startPolling(chatId, session, pollPage)
+      await startPolling(chatId, session)
       printState()
     } catch (e) {
       log.error(`error: ${e.message}`, chatId)
       try {
-        const proxy = getProxy()
-        if (proxy) {
-          const test = await testProxy(proxy)
-          if (!test.ok) {
-            ctx.reply('Your proxy is not working. Please update it in Settings - Set Proxy.')
-          } else {
-            ctx.reply('Browser error occurred. Check proxy or try again.')
-          }
-        } else {
-          ctx.reply('Error occurred. Check proxy or try again.')
-        }
+        ctx.reply('Error occurred. Try again.')
         await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Error occurred. Try again.')
       } catch {}
     } finally {
@@ -792,45 +870,29 @@ async function resumeSessions() {
           log.info(`retry ${attempt}/3 for ${chatId} in ${delay}ms`, chatId)
           await new Promise(r => setTimeout(r, delay))
         }
-        let browser
         try {
-          const proxy = getProxy()
-          const proxyInfo = proxy ? `${proxy.server}` : 'none'
           log.info(`resuming session ${chatId} (attempt ${attempt}/3), ${s.numbers.length} number(s): ${s.numbers.map(n => n.number).join(', ')}`, chatId)
-          const opts = proxy ? { headless: false, proxy } : { headless: false }
-          browser = await chromium.launch(opts)
-          const page = await browser.newPage()
-          await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
-          const loginRes = await page.evaluate(async ({ url, email, password }) => {
-            const r = await fetch(url, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ id: 101, query: { email, password } }),
-            })
-            return r.json()
-          }, { url: API, email: s.email, password: s.password })
+          const loginRes = await cfRequestProxied({ id: 101, query: { email: s.email, password: s.password } }, s.email)
           const token = (loginRes && loginRes.token) || ''
           if (!token) {
             log.error(`resume login failed for ${chatId}`, chatId)
-            await browser.close()
-          delete data.savedSessions[chatId]
+            delete data.savedSessions[chatId]
+            delete data.oldSessions[chatId]
+            saveData()
+            bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+            return
+          }
+          const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
+          sessions[chatId] = session
           delete data.oldSessions[chatId]
           saveData()
-          bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+          await startPolling(chatId, session)
+          log.success(`session resumed for ${chatId}`, chatId)
+          printState()
           return
-        }
-        const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
-        sessions[chatId] = session
-        delete data.oldSessions[chatId]
-        saveData()
-        await startPolling(chatId, session, page)
-        log.success(`session resumed for ${chatId}`, chatId)
-        printState()
-        return
         } catch (e) {
           lastError = e.message
           log.error(`resume attempt ${attempt}/3 failed for ${chatId}: ${e.message}`, chatId)
-          try { await browser.close() } catch (_) {}
         }
       }
       log.error(`resume failed for ${chatId} after 3 attempts: ${lastError}`, chatId)
@@ -842,9 +904,7 @@ async function resumeSessions() {
   }
 }
 
-let bot
-if (!isTest) {
-bot = new Telegraf(TG_TOKEN)
+let bot = new Telegraf(TG_TOKEN)
 
 bot.use((ctx, next) => {
   const chatId = ctx.chat?.id
@@ -889,13 +949,9 @@ bot.on('text', async (ctx) => {
     delete pendingProxy[chatId]
     const input = ctx.message.text.trim()
     const parsed = parseProxyUrl(input)
-    if (!parsed) {
-      return ctx.reply('Invalid proxy format. Use: http://user:pass@host:port')
-    }
-    const result = await testProxy(parsed)
-    if (!result.ok) {
-      return ctx.reply('Proxy test failed, address may be invalid or unreachable')
-    }
+    if (!parsed) return ctx.reply('Invalid proxy format. Use: http://user:pass@host:port')
+    const result = await testProxyViaCf()
+    if (!result.ok) return ctx.reply('Proxy test failed, address may be invalid or unreachable')
     data.proxy = parsed
     saveData()
     log.success(`proxy updated to ${parsed.server}, ip ${result.ip}`, chatId)
@@ -929,11 +985,7 @@ bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
     sessions[chatId].numbers = []
   }
   saveData()
-  const resumeBtn = [[{ text: 'Resume Monitoring', callback_data: `start_monitor_${chatId}_${msgId}` }]]
-  await ctx.telegram.editMessageText(chatId, msgId, undefined,
-    '<b>Monitoring stopped</b>\n\nClick Resume to continue monitoring.',
-    { parse_mode: 'HTML', reply_markup: { inline_keyboard: resumeBtn } }
-  ).catch(() => {})
+  await editStoppedMessage(ctx, chatId, msgId)
   printState()
 })
 
@@ -944,12 +996,7 @@ bot.action(/stop_cancel_(\d+)_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery()
   const session = sessions[chatId]
   if (session && session.numbers.length) {
-      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
-      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
-    await ctx.telegram.editMessageText(chatId, msgId, undefined,
-      `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
-      { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
-    ).catch(() => {})
+    await editMonitorMessage(ctx, chatId, msgId, session)
   } else {
     await ctx.editMessageReplyMarkup({})
   }
@@ -985,31 +1032,14 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
     return ctx.reply('Choose an option:', mainMenu())
   }
   try {
-    const proxy = getProxy()
-    const opts = proxy ? { headless: false, proxy } : { headless: false }
-    const browser = await chromium.launch(opts)
-    const page = await browser.newPage()
-    await page.goto('https://2nd-no.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
-    const loginRes = await page.evaluate(async ({ url, email, password }) => {
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id: 101, query: { email, password } }),
-      })
-      return r.json()
-    }, { url: API, email: session.email, password: session.password })
+    const loginRes = await cfRequestProxied({ id: 101, query: { email: session.email, password: session.password } }, session.email)
     const token = (loginRes && loginRes.token) || ''
     if (!token) throw new Error('login failed')
     session.token = token
     sessions[chatId] = session
-    await startPolling(chatId, session, page)
+    await startPolling(chatId, session)
     monitorMessages[chatId] = msgId
-      const numList = session.numbers.map((n, i) => `${i + 1}. <code>+48${n.number}</code> 🇵🇱`).join('\n')
-      const stopBtn = [[{ text: 'Stop Monitoring', callback_data: `stop_${chatId}_${msgId}` }]]
-    await ctx.telegram.editMessageText(chatId, msgId, undefined,
-      `<b>Your numbers ${session.numbers.length}:</b>\n${numList}\n\nMonitoring for incoming SMS`,
-      { parse_mode: 'HTML', reply_markup: { inline_keyboard: stopBtn } }
-    ).catch(() => {})
+    await editMonitorMessage(ctx, chatId, msgId, session)
     printState()
   } catch (e) {
     log.error(`start monitor failed: ${e.message}`, chatId)
@@ -1054,31 +1084,31 @@ bot.action('data_import', async (ctx) => {
   await ctx.editMessageText('Send me the data.json file to import', dataMenu())
 })
 
-bot.action('settings_testproxy', async (ctx) => {
-  await ctx.answerCbQuery()
-  const chatId = ctx.chat.id
-  const proxy = getProxy()
-  if (!proxy) {
-    return ctx.reply('No proxy set')
-  }
-  const result = await testProxy(proxy)
-  if (result.ok) {
-    log.success(`proxy test ok, ip ${result.ip}`, chatId)
-    return ctx.reply(`Proxy is working, IP: ${result.ip}`)
-  }
-  log.error('proxy test failed', chatId)
-  return ctx.reply('Proxy test failed, provide a new one')
-})
+
 
 bot.action('settings_proxy', async (ctx) => {
   const chatId = ctx.chat.id
   log.info('requested proxy change', chatId)
   await ctx.answerCbQuery()
   const proxy = getProxy()
-  const currentInfo = proxy ? `Current: ${proxy.username ? proxy.server.replace('://', `://${proxy.username}:${proxy.password}@`) : proxy.server}` : 'No proxy set'
+  const currentInfo = proxy ? `Current: ${proxyString()}` : 'No proxy set'
   pendingProxy[ctx.chat.id] = true
-  await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`, 
+  await ctx.editMessageText(`Send proxy URL in format:\nhttp://user:pass@host:port\n\n${currentInfo}`,
     Markup.inlineKeyboard([[Markup.button.callback('Back', 'settings')]]))
+})
+
+bot.action('settings_testproxy', async (ctx) => {
+  await ctx.answerCbQuery()
+  const chatId = ctx.chat.id
+  const proxy = getProxy()
+  if (!proxy) return ctx.reply('No proxy set')
+  const result = await testProxyViaCf()
+  if (result.ok) {
+    log.success(`proxy test ok, ip ${result.ip}`, chatId)
+    return ctx.reply(`Proxy is working, IP: ${result.ip}`)
+  }
+  log.error('proxy test failed', chatId)
+  return ctx.reply('Proxy test failed, provide a new one')
 })
 
 bot.action('settings_status', async (ctx) => {
@@ -1159,56 +1189,56 @@ bot.action('get_number', async (ctx) => {
   await processGetNumber(ctx, count)
 })
 
-bot.launch()
-log.success('bot started')
-printState()
-resumeSessions()
+const args = process.argv.slice(2)
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`Usage: node test/nobrowser/nobrowser.js [options]
+
+Options:
+  --generate N, -g N   Generate N numbers in CLI mode and print result as JSON
+  --proxy URL, -p URL   Set proxy for signup/login (e.g. http://user:pass@host:port)
+  --help, -h           Show this help
+
+Without arguments, runs the Telegram bot.`)
+  process.exit(0)
+}
+
+const proxyIdx = args.findIndex(a => a === '--proxy' || a === '-p')
+if (proxyIdx !== -1) {
+  const parsed = parseProxyUrl(args[proxyIdx + 1])
+  if (parsed) data.proxy = parsed
+}
+
+const genIdx = args.findIndex(a => a === '--generate' || a === '-g')
+if (genIdx !== -1) {
+  const count = Math.min(parseInt(args[genIdx + 1], 10) || 1, 3)
+  log.info(`CLI generate ${count} number(s)`)
+  registerAndGetNumbers(count, null, null).then(result => {
+    console.log(JSON.stringify({ email: result.email, password: result.password, token: result.token, numbers: result.numbers }, null, 2))
+    cfClient.close()
+    process.exit(0)
+  }).catch(e => {
+    console.error(JSON.stringify({ error: e.message }))
+    cfClient.close()
+    process.exit(1)
+  })
+} else {
+  bot.launch()
+  log.success('bot started')
+  printState()
+  resumeSessions()
+}
 
 process.on('SIGINT', async () => {
-  for (const id of Object.keys(pollBrowsers)) await stopPolling(id)
+  for (const id of Object.keys(pollingSessions)) await stopPolling(id)
+  cfClient.close()
+  if (redis) { saveData(); await redis.quit() }
   bot.stop('SIGINT')
   process.exit(0)
 })
 process.on('SIGTERM', async () => {
-  for (const id of Object.keys(pollBrowsers)) await stopPolling(id)
+  for (const id of Object.keys(pollingSessions)) await stopPolling(id)
+  cfClient.close()
+  if (redis) { saveData(); await redis.quit() }
   bot.stop('SIGTERM')
   process.exit(0)
 })
-} else {
-;(async () => {
-  const chatId = 'test'
-  log.info('running in test mode', chatId)
-  let session, pollPage
-  const count = testCount
-
-  if (testLogin) {
-    if (!testEmail) throw new Error('--login requires --email')
-    const found = Object.values(sessions).find(s => s.email === testEmail)
-    if (!found) throw new Error(`No saved session for ${testEmail}`)
-    log.info(`using existing session for ${testEmail}`, chatId)
-    const result = await loginAndGetNumbers({ ...found, chatId }, count, chatId, null)
-    session = { ...found, ...result, chatId }
-    pollPage = result.page
-  } else {
-    const email = testEmail || `${rand(8)}@kilolabs.space`
-    log.info(`email: ${email}`, chatId)
-    const result = await registerAndGetNumbers(count, chatId, null)
-    session = { email, password: DEFAULT_PASSWORD, token: result.token, numbers: result.numbers, chatId }
-    pollPage = result.page
-    sessions[chatId] = session
-  }
-
-  const numList = session.numbers.map(n => `+48 ${n.number}`).join(', ')
-  log.info(`numbers ${session.numbers.length}: ${numList}`, chatId)
-  log.info(`polling for SMS for ${testTimeout / 1000}s, press Ctrl+C to stop`, chatId)
-
-  await startPolling(chatId, session, pollPage)
-  await sleep(testTimeout)
-  await stopPolling(chatId)
-  log.info('test timeout reached', chatId)
-  process.exit(0)
-})().catch((e) => {
-  log.error(`fatal error: ${e.message}`, 'test')
-  process.exit(1)
-})
-}
