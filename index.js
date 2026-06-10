@@ -305,46 +305,19 @@ async function cfRequestProxied(body, sticky) {
   return JSON.parse(resp.body)
 }
 
-const PROXY_TESTER = `import sys, json, tls_client
-session = tls_client.Session(client_identifier="chrome_120", random_tls_extension_order=True)
-for line in sys.stdin:
-    req = json.loads(line.strip())
-    proxy = req.get("proxy")
-    session.proxies = {"http": proxy, "https": proxy} if proxy else {}
-    try:
-        resp = session.get(req["url"], timeout_seconds=req.get("timeout", 15))
-        print(json.dumps({"status": resp.status_code, "body": resp.text[:500]}, ensure_ascii=False), flush=True)
-    except Exception as e:
-        print(json.dumps({"error": str(e)}, ensure_ascii=False), flush=True)
-`
-
 async function testProxyViaCf(proxyOverride) {
   const proxy = proxyOverride || proxyString()
   if (!proxy) return { ok: false }
 
-  const runTest = (url) => new Promise((resolve) => {
-    const script = path.join(fs.mkdtempSync('proxy-test-'), 'pt.py')
-    fs.writeFileSync(script, PROXY_TESTER)
-    const proc = spawn('python', [script], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } })
-    let buf = ''
-    proc.stdout.on('data', c => buf += c.toString())
-    proc.stderr.on('data', () => {})
-    proc.on('error', () => resolve({ error: 'spawn failed' }))
-    proc.on('close', () => {
-      try { resolve(JSON.parse(buf.trim())) } catch { resolve({ error: 'no output' }) }
-    })
-    proc.stdin.write(JSON.stringify({ proxy, url, timeout: 15 }) + '\n')
-    proc.stdin.end()
-    setTimeout(() => { proc.kill(); resolve({ error: 'timeout' }) }, 22000)
-  })
-
   const urls = ['https://api.ipify.org?format=json', 'https://icanhazip.com', 'https://httpbin.org/ip']
   for (const url of urls) {
-    const result = await runTest(url)
-    if (result.error) continue
-    const body = result.body || ''
-    const ip = body.match(/(\d+\.\d+\.\d+\.\d+)/)
-    if (ip) return { ok: true, ip: ip[1] }
+    try {
+      const resp = await cfClient.request(url, {}, { method: 'GET', proxy, timeout: 15 })
+      if (resp.error) continue
+      const body = resp.body || ''
+      const ip = body.match(/(\d+\.\d+\.\d+\.\d+)/)
+      if (ip) return { ok: true, ip: ip[1] }
+    } catch { continue }
   }
   return { ok: false, error: 'proxy unreachable from container' }
 }
