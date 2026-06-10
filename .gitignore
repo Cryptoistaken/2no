@@ -4,3 +4,6 @@ package-lock.json
 data.json
 logs/
 .env
+2no-py-*/
+proxy-test-*/
+test-api-*/

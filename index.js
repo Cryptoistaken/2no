@@ -9,7 +9,7 @@ import chalk from 'chalk'
 import { Redis } from 'ioredis'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const ENV_FILE = path.join(__dirname, '..', '..', '.env')
+const ENV_FILE = path.join(__dirname, '.env')
 
 
 function loadEnv() {
@@ -100,10 +100,18 @@ const REDIS_KEY = '2no:data'
 let redis = null
 let data = { proxy: null, users: {} }
 
+const _ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false })
+
+const log = {
+  info: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  success: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  error: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+  warning: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
+}
 async function loadData() {
   if (!REDIS_URL) return
   redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3, retryStrategy: t => Math.min(t * 100, 2000) })
-  redis.on('error', e => log.error(`redis: ${e.message}`))
+  redis.on('error', e => console.error(`redis: ${e.message}`))
   try {
     const raw = await redis.get(REDIS_KEY)
     if (raw) {
@@ -188,11 +196,13 @@ class CfClient {
     this.workers = []
     this.pending = new Map()
     this.counter = 0
+    this.targetCount = workerCount
     for (let i = 0; i < workerCount; i++) this._spawn()
   }
 
   _spawn() {
     const proc = spawn('python', [WORKER_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } })
+    this.workers.push(proc)
     proc.on('error', () => {})
     let buf = ''
     proc.stdout.on('data', c => {
@@ -204,36 +214,60 @@ class CfClient {
         try {
           const r = JSON.parse(l)
           const e = this.pending.get(r.id)
-          if (e) { this.pending.delete(r.id); e.resolve(r) }
+          if (e) { clearTimeout(e._timer); this.pending.delete(r.id); e.resolve(r) }
         } catch (_) {}
       }
     })
-    proc.stderr.on('data', () => {})
-    proc.on('exit', () => setTimeout(() => this._spawn(), 1000))
-    this.workers.push(proc)
+    proc.stderr.on('data', d => {
+      const msg = d.toString().trim()
+      if (msg) log.error(`worker stderr: ${msg}`)
+    })
+    proc.on('exit', (code) => {
+      const i = this.workers.indexOf(proc)
+      if (i !== -1) this.workers.splice(i, 1)
+      this._spawn()
+    })
+  }
+
+  _ensureWorker() {
+    if (this.workers.length > 0) return
+    log.warning('no workers, spawning emergency worker')
+    this._spawn()
   }
 
   _workerIndex(key) {
-    if (!key) return this.counter++ % this.workers.length
+    this._ensureWorker()
+    const len = this.workers.length || 1
+    if (!key) return this.counter++ % len
     let h = 5381
     for (let i = 0; i < key.length; i++) h = ((h << 5) + h + key.charCodeAt(i)) | 0
-    return Math.abs(h) % this.workers.length
+    return Math.abs(h) % len
   }
 
   request(url, body, opts = {}) {
     const id = Date.now() + Math.random()
+    const timeoutMs = (opts.timeout || 30) * 1000
     return new Promise((res, rej) => {
-      this.pending.set(id, { resolve: res })
+      this._ensureWorker()
+      const wi = this._workerIndex(opts.sticky)
+      const worker = this.workers[wi]
+      if (!worker) return rej(new Error('no worker available'))
+      const entry = { resolve: res, worker }
+      entry._timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id)
+          entry.worker.kill()
+          rej(new Error('Timeout'))
+        }
+      }, timeoutMs + 5000)
+      this.pending.set(id, entry)
       const msg = JSON.stringify({
         id, url, body, method: opts.method || 'POST',
         proxy: opts.proxy || null,
         headers: opts.headers || {},
         timeout: opts.timeout || 30
       }) + '\n'
-      this.workers[this._workerIndex(opts.sticky)].stdin.write(msg)
-      setTimeout(() => {
-        if (this.pending.has(id)) { this.pending.delete(id); rej(new Error('Timeout')) }
-      }, (opts.timeout || 30) * 1000 + 5000)
+      worker.stdin.write(msg)
     })
   }
 
@@ -271,32 +305,54 @@ async function cfRequestProxied(body, sticky) {
   return JSON.parse(resp.body)
 }
 
-async function testProxyViaCf() {
-  const proxy = proxyString()
+const PROXY_TESTER = `import sys, json, tls_client
+session = tls_client.Session(client_identifier="chrome_120", random_tls_extension_order=True)
+for line in sys.stdin:
+    req = json.loads(line.strip())
+    proxy = req.get("proxy")
+    session.proxies = {"http": proxy, "https": proxy} if proxy else {}
+    try:
+        resp = session.get(req["url"], timeout_seconds=req.get("timeout", 15))
+        print(json.dumps({"status": resp.status_code, "body": resp.text[:500]}, ensure_ascii=False), flush=True)
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False), flush=True)
+`
+
+async function testProxyViaCf(proxyOverride) {
+  const proxy = proxyOverride || proxyString()
   if (!proxy) return { ok: false }
-  try {
-    const resp = await cfClient.request('https://httpbin.org/ip', {}, { method: 'GET', proxy })
-    const data = JSON.parse(resp.body)
-    return { ok: true, ip: data.origin }
-  } catch (e) {
-    return { ok: false, error: e.message }
+
+  const runTest = (url) => new Promise((resolve) => {
+    const script = path.join(fs.mkdtempSync('proxy-test-'), 'pt.py')
+    fs.writeFileSync(script, PROXY_TESTER)
+    const proc = spawn('python', [script], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } })
+    let buf = ''
+    proc.stdout.on('data', c => buf += c.toString())
+    proc.stderr.on('data', () => {})
+    proc.on('error', () => resolve({ error: 'spawn failed' }))
+    proc.on('close', () => {
+      try { resolve(JSON.parse(buf.trim())) } catch { resolve({ error: 'no output' }) }
+    })
+    proc.stdin.write(JSON.stringify({ proxy, url, timeout: 15 }) + '\n')
+    proc.stdin.end()
+    setTimeout(() => { proc.kill(); resolve({ error: 'timeout' }) }, 22000)
+  })
+
+  const urls = ['https://api.ipify.org?format=json', 'https://icanhazip.com', 'https://httpbin.org/ip']
+  for (const url of urls) {
+    const result = await runTest(url)
+    if (result.error) continue
+    const body = result.body || ''
+    const ip = body.match(/(\d+\.\d+\.\d+\.\d+)/)
+    if (ip) return { ok: true, ip: ip[1] }
   }
+  return { ok: false, error: 'proxy unreachable from container' }
 }
 
 function rand(len = 8) {
   return Array.from({ length: len }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')
 }
-
-const _ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false })
-
-const log = {
-  info: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
-  success: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
-  error: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
-  warning: (msg, tag) => console.log(tag != null ? `${chalk.gray(`${_ts()}`)} ${chalk.cyan(String(tag))} ${chalk.white(msg)}` : `${chalk.gray(`${_ts()}`)} ${chalk.white(msg)}`),
-}
-
-function userStats(chatId) {
+function userStats(chatId) {
   if (!data.users[chatId]) {
     data.users[chatId] = { defaultNumbers: 3, captchaSolved: 0, numbersGenerated: 0, messagesReceived: 0, numbers: [], messages: [], emails: [] }
     saveData()
@@ -497,7 +553,8 @@ async function buyNumbers(token, count, solver, captchaPromises, chatId, onProgr
 }
 
 async function registerAndGetNumbers(count, chatId, onProgress) {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {    try {
+
     const email = `${rand(8)}@kilolabs.space`
     const password = DEFAULT_PASSWORD
     log.info(`registration attempt ${attempt + 1} with email ${email}`, chatId)
@@ -566,7 +623,10 @@ async function registerAndGetNumbers(count, chatId, onProgress) {
       saveData()
     }
     return { email, password, token, numbers: bought }
-  }
+      } catch (e) {
+      log.error(`registration attempt ${attempt + 1} error: ${e.message}`, chatId)
+    }
+}
   throw new Error('registration failed after 3 attempts')
 }
 
@@ -789,8 +849,9 @@ async function processGetNumber(ctx, count) {
         lastMsgText = data
         ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
       } else if (type === 'number') {
-        numbersBuffer.push(`<code>${data}</code>`)
-        const prefix = numbersBuffer.length >= count ? '<b>All numbers ready!</b>' : `<b>Got ${numbersBuffer.length}/${count}:</b>`
+        numbersBuffer.push(`<code>${data}</code> 🇵🇱`)
+        const done = numbersBuffer.length >= count
+        const prefix = done ? (count === 1 ? '<b>Number ready!</b>' : '<b>All numbers ready!</b>') : `<b>Got ${numbersBuffer.length}/${count}:</b>`
         const text = `${prefix}\n${numbersBuffer.join('\n')}`
         lastMsgText = text
         ctx.telegram.editMessageText(chatId, msg.message_id, undefined, text, { parse_mode: 'HTML' }).catch(() => {})
@@ -940,8 +1001,8 @@ bot.on('text', async (ctx) => {
     const input = ctx.message.text.trim()
     const parsed = parseProxyUrl(input)
     if (!parsed) return ctx.reply('Invalid proxy format. Use: http://user:pass@host:port')
-    const result = await testProxyViaCf()
-    if (!result.ok) return ctx.reply('Proxy test failed, address may be invalid or unreachable')
+    const result = await testProxyViaCf(input)
+    if (!result.ok) return ctx.reply(`Proxy test failed: ${result.error}`)
     data.proxy = parsed
     saveData()
     log.success(`proxy updated to ${parsed.server}, ip ${result.ip}`, chatId)
@@ -997,17 +1058,18 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
   const msgId = Number(ctx.match[2])
   if (ctx.chat.id !== chatId) return ctx.answerCbQuery('Not your session')
   await ctx.answerCbQuery()
-  let session = sessions[chatId]
-  if (!session || !session.numbers.length) {
-    if (data.oldSessions[chatId] && data.oldSessions[chatId].numbers && data.oldSessions[chatId].numbers.length) {
-      session = { ...data.oldSessions[chatId], chatId: Number(chatId) }
-      delete data.oldSessions[chatId]
-      sessions[chatId] = session
-      saveData()
-    } else if (data.savedSessions[chatId] && data.savedSessions[chatId].numbers && data.savedSessions[chatId].numbers.length) {
-      session = { ...data.savedSessions[chatId], chatId: Number(chatId) }
-      sessions[chatId] = session
-    } else {
+  let session
+  if (data.oldSessions[chatId] && data.oldSessions[chatId].numbers && data.oldSessions[chatId].numbers.length) {
+    session = { ...data.oldSessions[chatId], chatId: Number(chatId) }
+    delete data.oldSessions[chatId]
+    sessions[chatId] = session
+    saveData()
+  } else if (data.savedSessions[chatId] && data.savedSessions[chatId].numbers && data.savedSessions[chatId].numbers.length) {
+    session = { ...data.savedSessions[chatId], chatId: Number(chatId) }
+    sessions[chatId] = session
+  } else {
+    session = sessions[chatId]
+    if (!session || !session.numbers.length) {
       await ctx.telegram.editMessageText(chatId, msgId, undefined,
         'No numbers to monitor.'
       ).catch(() => {})
@@ -1212,6 +1274,9 @@ if (genIdx !== -1) {
     process.exit(1)
   })
 } else {
+  const startupDelay = 15000
+  log.info(`waiting ${startupDelay / 1000}s for old instance to shutdown...`)
+  await new Promise(r => setTimeout(r, startupDelay))
   bot.launch()
   log.success('bot started')
   printState()
