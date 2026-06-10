@@ -93,6 +93,9 @@ for line in sys.stdin:
         print(json.dumps({"id": rid, "error": str(e)}, ensure_ascii=False), flush=True)
 `
 
+for (const d of fs.readdirSync(__dirname).filter(f => f.startsWith('2no-py-'))) {
+  fs.rmSync(path.join(__dirname, d), { recursive: true, force: true })
+}
 const WORKER_SCRIPT = path.join(fs.mkdtempSync('2no-py-'), 'worker.py')
 fs.writeFileSync(WORKER_SCRIPT, PYTHON_WORKER)
 
@@ -1216,6 +1219,7 @@ bot.action('get_number', async (ctx) => {
 
 const args = process.argv.slice(2)
 if (args.includes('--help') || args.includes('-h')) {
+  fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   console.log(`Usage: node test/nobrowser/nobrowser.js [options]
 
 Options:
@@ -1237,11 +1241,14 @@ const genIdx = args.findIndex(a => a === '--generate' || a === '-g')
 if (genIdx !== -1) {
   const count = Math.min(parseInt(args[genIdx + 1], 10) || 1, 3)
   log.info(`CLI generate ${count} number(s)`)
+  const cleanup = () => fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   registerAndGetNumbers(count, null, null).then(result => {
+    cleanup()
     console.log(JSON.stringify({ email: result.email, password: result.password, token: result.token, numbers: result.numbers }, null, 2))
     cfClient.close()
     process.exit(0)
   }).catch(e => {
+    cleanup()
     console.error(JSON.stringify({ error: e.message }))
     cfClient.close()
     process.exit(1)
@@ -1260,6 +1267,7 @@ process.on('SIGINT', async () => {
   for (const id of Object.keys(pollingSessions)) await stopPolling(id)
   cfClient.close()
   if (redis) { saveData(); await redis.quit() }
+  fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   bot.stop('SIGINT')
   process.exit(0)
 })
@@ -1267,6 +1275,7 @@ process.on('SIGTERM', async () => {
   for (const id of Object.keys(pollingSessions)) await stopPolling(id)
   cfClient.close()
   if (redis) { saveData(); await redis.quit() }
+  fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   bot.stop('SIGTERM')
   process.exit(0)
 })
