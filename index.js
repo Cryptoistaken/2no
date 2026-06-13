@@ -832,7 +832,8 @@ async function startPolling(chatId, session) {
       const forNumbers = (msgs.result || []).filter(m => numberIds.includes(m.number_id))
 
       if (!forNumbers.length && pollCount % 6 === 0) {
-        log.info(`poll OK, ${(msgs.result || []).length} total messages. listening`, chatId)
+        const nums = (session.numbers || []).map(n => `+48${n.number}`).join(', ')
+        log.info(`poll OK, ${(msgs.result || []).length} total messages. listening [${nums}]`, chatId)
       }
 
       for (const m of forNumbers) {
