@@ -949,14 +949,14 @@ async function processGetNumber(ctx) {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('Refresh', 'refresh_number'),
         Markup.button.callback('Get This', 'confirm_buy'),
+        Markup.button.callback('Refresh', 'refresh_number'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
     ])
 
     await ctx.reply(
-      `<b>+48${num.number}</b> 🇵🇱\n\n` +
+      `<code>+48${num.number}</code> 🇵🇱\n\n` +
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
       `Get This - purchase this number`,
@@ -1336,14 +1336,14 @@ bot.action('refresh_number', async (ctx) => {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('Refresh', 'refresh_number'),
         Markup.button.callback('Get This', 'confirm_buy'),
+        Markup.button.callback('Refresh', 'refresh_number'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
     ])
 
     await ctx.editMessageText(
-      `<b>+48${num.number}</b> 🇵🇱\n\n` +
+      `<code>+48${num.number}</code> 🇵🇱\n\n` +
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
       `Get This - purchase this number`,
