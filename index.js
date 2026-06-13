@@ -979,6 +979,10 @@ async function resumeSessions() {
   log.info(`resuming ${entries.length} saved session(s)`)
   for (const [chatId, s] of entries) {
     if (sessions[chatId]) continue
+    if (s.stopped) {
+      log.info(`skipping stopped session ${chatId}`, chatId)
+      continue
+    }
     if (!s.numbers || !s.numbers.length) {
       log.info(`skipping session ${chatId} with 0 numbers`, chatId)
       delete data.savedSessions[chatId]
@@ -1105,8 +1109,8 @@ bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
   if (sessions[chatId]) {
     sessions[chatId].numbers = []
   }
-  delete data.savedSessions[chatId]
-  delete data.oldSessions[chatId]
+  if (data.savedSessions[chatId]) data.savedSessions[chatId].stopped = true
+  if (data.oldSessions[chatId]) data.oldSessions[chatId].stopped = true
   saveData()
   await editStoppedMessage(ctx, chatId, msgId)
   printState()
@@ -1132,12 +1136,12 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery()
   let session
   if (data.oldSessions[chatId] && data.oldSessions[chatId].numbers && data.oldSessions[chatId].numbers.length) {
-    session = { ...data.oldSessions[chatId], chatId: Number(chatId) }
+    session = { ...data.oldSessions[chatId], chatId: Number(chatId), stopped: false }
     delete data.oldSessions[chatId]
     sessions[chatId] = session
     saveData()
   } else if (data.savedSessions[chatId] && data.savedSessions[chatId].numbers && data.savedSessions[chatId].numbers.length) {
-    session = { ...data.savedSessions[chatId], chatId: Number(chatId) }
+    session = { ...data.savedSessions[chatId], chatId: Number(chatId), stopped: false }
     sessions[chatId] = session
   } else {
     session = sessions[chatId]
