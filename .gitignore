@@ -5,4 +5,5 @@ data.json
 logs/
 .env
 2no-py-*/
+backup/
 

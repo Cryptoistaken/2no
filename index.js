@@ -186,6 +186,7 @@ const pollTimers = {}
 const pollingSessions = {}
 const seenMessages = {}
 const processing = {}
+const pendingNumber = {}
 const monitorMessages = {}
 const autoStopTimers = {}
 const reAuthLocks = {}
@@ -528,6 +529,97 @@ async function buyNumbers(token, count, solver, captchaPromises, chatId, onProgr
   return bought
 }
 
+async function registerOnly(chatId, onProgress) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const email = `${rand(8)}@kilolabs.space`
+      const password = DEFAULT_PASSWORD
+      if (onProgress) onProgress('progress', `Creating account (${attempt + 1}/3)`)
+
+      const reg = await cfRequestProxied({ id: 103, query: { email, password } }, email)
+      if (!reg.success) {
+        if (reg.error === 'EmailExists') continue
+        throw new Error(`register failed: ${JSON.stringify(reg)}`)
+      }
+      if (onProgress) onProgress('progress', 'Account created, waiting for verification email')
+
+      let msg = null
+      const deadline = Date.now() + 90000
+      while (Date.now() < deadline) {
+        const inbox = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}`).then(r => r.ok ? r.json() : [])
+        if (Array.isArray(inbox) && inbox.length) { msg = inbox[0]; break }
+        await sleep(2000)
+      }
+      if (!msg) { if (onProgress) onProgress('progress', 'Verification email timeout, retrying...'); continue }
+      if (onProgress) onProgress('progress', 'Verification email received')
+
+      const body = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}/${msg.id}`).then(r => r.json())
+      const html = (body && body.html) || ''
+      const text = (body && body.text) || ''
+      const m = html.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
+      const m2 = text.match(/https:\/\/2nd-no\.com\/auth\/create-account\/\?[^\s"<]+/)
+      const verifyLink = m ? m[0].replace(/&amp;/g, '&') : (m2 ? m2[0].replace(/&amp;/g, '&') : null)
+      if (!verifyLink) { if (onProgress) onProgress('progress', 'No verify link, retrying...'); continue }
+
+      const urlParams = Object.fromEntries(new URL(verifyLink).searchParams)
+      const confirmRes = await cfRequestProxied({ id: 104, query: { email: urlParams.email || email, token: urlParams.token } }, email)
+      if (!confirmRes.success) { if (onProgress) onProgress('progress', 'Verification failed, retrying...'); continue }
+
+      if (onProgress) onProgress('progress', 'Account confirmed, logging in')
+      const loginRes = await cfRequestProxied({ id: 101, query: { email, password } }, email)
+      const token = (loginRes && loginRes.token) || ''
+      if (!token) { if (onProgress) onProgress('progress', 'Login failed, retrying...'); continue }
+
+      if (onProgress) onProgress('progress', 'Account ready')
+      return { email, password, token }
+    } catch (e) {
+      log.error(`registration attempt ${attempt + 1} error: ${e.message}`, chatId)
+      if (onProgress) onProgress('progress', `Attempt ${attempt + 1} failed: ${e.message.substring(0, 40)}`)
+    }
+  }
+  throw new Error('registration failed after 3 attempts')
+}
+
+async function buySingleNumber(session, numberInfo, chatId) {
+  const solver = createCaptchaSolver(chatId, 1)
+  const captchaToken = await solver.getValidToken()
+
+  log.info(`captcha solved, buying number ${numberInfo.number}`, chatId)
+
+  const buyRes = await cfRequestAuth(session.token, {
+    id: 301,
+    query: {
+      number_id: numberInfo.number_id,
+      name: '',
+      color: '#4893EC',
+      availability_days: [1, 2, 3, 4, 5, 6, 7],
+      hour_from: '00:00:00.000Z',
+      hour_to: '23:59:59.999Z',
+      right_to_transfer_number: true,
+      marketing: false,
+      response_key: captchaToken,
+    },
+  }, session.email)
+
+  if (!buyRes.success) {
+    throw new Error(`buy failed: ${JSON.stringify(buyRes)}`)
+  }
+
+  if (!session.numbers) session.numbers = []
+  session.numbers.push({ number: numberInfo.number, number_id: numberInfo.number_id, purchasedAt: new Date().toISOString() })
+
+  const st = userStats(chatId)
+  st.numbersGenerated = (st.numbersGenerated || 0) + 1
+  if (!st.numbers) st.numbers = []
+  st.numbers.push({ number: numberInfo.number, number_id: numberInfo.number_id, purchasedAt: new Date().toISOString() })
+
+  data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+  saveData()
+
+  log.success(`number ${numberInfo.number} purchased`, chatId)
+  return { number: numberInfo.number, number_id: numberInfo.number_id }
+}
+
 async function registerAndGetNumbers(count, chatId, onProgress) {
   for (let attempt = 0; attempt < 3; attempt++) {    try {
 
@@ -803,82 +895,79 @@ function setUserDefaultNumbers(chatId, count) {
   saveData()
 }
 
-async function processGetNumber(ctx, count) {
+async function processGetNumber(ctx) {
   const chatId = ctx.chat.id
   if (processing[chatId]) {
-    await ctx.answerCbQuery('Already processing your request')
+    await ctx.answerCbQuery('Already processing...')
     return
   }
-  log.info('processing flag set', chatId)
+
   processing[chatId] = true
   await ctx.answerCbQuery()
-  const msg = await ctx.reply(`Getting ${count} numbers, this may take a minute`)
-  log.info(`user requested ${count} numbers`, chatId)
-  log.info('launching background task', chatId)
 
-  const numbersBuffer = []
-  let lastMsgText = ''
+  try {
+    let session = sessions[chatId]
 
-  const onProgress = (type, data) => {
-    try {
-      if (type === 'progress') {
-        lastMsgText = data
-        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
-      } else if (type === 'number') {
-        numbersBuffer.push(`<code>${data}</code> 🇵🇱`)
-        const done = numbersBuffer.length >= count
-        const prefix = done ? (count === 1 ? '<b>Number ready!</b>' : '<b>All numbers ready!</b>') : `<b>Got ${numbersBuffer.length}/${count}:</b>`
-        const text = `${prefix}\n${numbersBuffer.join('\n')}`
-        lastMsgText = text
-        ctx.telegram.editMessageText(chatId, msg.message_id, undefined, text, { parse_mode: 'HTML' }).catch(() => {})
+    if (!session || (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT)) {
+      const msg = await ctx.reply('🔄 Setting up account...')
+
+      if (session) {
+        data.oldSessions[chatId] = { ...session }
       }
-    } catch {}
-  }
 
-  ;(async () => {
-    try {
-      let session
+      const result = await registerOnly(chatId, (type, data) => {
+        if (type === 'progress') {
+          ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `🔄 ${data}`).catch(() => {})
+        }
+      })
 
-      if (data.savedSessions[chatId]) {
-        data.oldSessions[chatId] = { ...data.savedSessions[chatId] }
-      }
-      if (sessions[chatId]) {
-        delete sessions[chatId]
-      }
-      saveData()
-
-      const result = await registerAndGetNumbers(count, chatId, onProgress)
       session = {
         email: result.email,
         password: DEFAULT_PASSWORD,
         token: result.token,
-        numbers: result.numbers,
-        chatId: chatId,
+        numbers: [],
+        chatId,
       }
       sessions[chatId] = session
       data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
-      userStats(chatId).numbers = result.numbers.map(n => n.number)
       saveData()
-      log.success(`account created, numbers: ${result.numbers.length}`, chatId)
 
-      await stopPolling(chatId)
-
-      monitorMessages[chatId] = msg.message_id
-      await editMonitorMessage(ctx, chatId, msg.message_id, session)
-
-      await startPolling(chatId, session)
-      printState()
-    } catch (e) {
-      log.error(`error: ${e.message}`, chatId)
-      try {
-        ctx.reply('Error occurred. Try again.')
-        await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Error occurred. Try again.')
-      } catch {}
-    } finally {
-      log.info('processing flag cleared', chatId)
-      delete processing[chatId]
+      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, '✅ Account ready!').catch(() => {})
     }
-  })()
+
+    const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
+    if (!avail.result || !avail.result.length) {
+      await ctx.reply('❌ No numbers available. Try again later.', { reply_markup: mainMenu() })
+      return
+    }
+
+    const num = avail.result[0]
+    pendingNumber[chatId] = { number: num.number, number_id: num.id }
+
+    const bought = session.numbers ? session.numbers.length : 0
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Refresh', 'refresh_number'),
+        Markup.button.callback('✅ Get This', 'confirm_buy'),
+      ],
+      [Markup.button.callback('« Main Menu', 'main')],
+    ])
+
+    await ctx.reply(
+      `🇵🇱 <b>+48${num.number}</b>\n\n` +
+      `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
+      `🔄 Refresh — see another number\n` +
+      `✅ Get This — purchase this number`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    )
+
+  } catch (e) {
+    log.error(`get number error: ${e.message}`, chatId)
+    await ctx.reply('❌ Error: ' + e.message.substring(0, 100), { reply_markup: mainMenu() })
+  } finally {
+    delete processing[chatId]
+  }
 }
 
 async function resumeSessions() {
@@ -1212,9 +1301,116 @@ for (let n = 1; n <= 3; n++) {
 }
 
 bot.action('get_number', async (ctx) => {
+  await processGetNumber(ctx)
+})
+
+bot.action('refresh_number', async (ctx) => {
   const chatId = ctx.chat.id
-  const count = getUserDefaultNumbers(chatId)
-  await processGetNumber(ctx, count)
+  const session = sessions[chatId]
+  if (!session) {
+    await ctx.answerCbQuery('Session expired')
+    return ctx.editMessageText('Session expired. Get a new number.', { reply_markup: mainMenu() })
+  }
+
+  await ctx.answerCbQuery()
+
+  try {
+    const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
+    if (!avail.result || !avail.result.length) {
+      await ctx.editMessageText('❌ No numbers available.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+      return
+    }
+
+    const num = avail.result[0]
+    pendingNumber[chatId] = { number: num.number, number_id: num.id }
+
+    const bought = session.numbers ? session.numbers.length : 0
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Refresh', 'refresh_number'),
+        Markup.button.callback('✅ Get This', 'confirm_buy'),
+      ],
+      [Markup.button.callback('« Main Menu', 'main')],
+    ])
+
+    await ctx.editMessageText(
+      `🇵🇱 <b>+48${num.number}</b>\n\n` +
+      `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
+      `🔄 Refresh — see another number\n` +
+      `✅ Get This — purchase this number`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    )
+  } catch (e) {
+    log.error(`refresh error: ${e.message}`, chatId)
+    await ctx.answerCbQuery('Refresh failed, try again')
+  }
+})
+
+bot.action('confirm_buy', async (ctx) => {
+  const chatId = ctx.chat.id
+  const session = sessions[chatId]
+  const pending = pendingNumber[chatId]
+
+  if (!session || !pending) {
+    await ctx.answerCbQuery('Session expired')
+    await ctx.editMessageText('Session expired. Use Main Menu to start over.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    return
+  }
+
+  if (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT) {
+    await ctx.answerCbQuery('Account limit reached')
+    await ctx.editMessageText(`❌ This account has reached the maximum of ${MAX_NUMBERS_PER_ACCOUNT} purchases.\nUse Main Menu to create a new account.`, { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    return
+  }
+
+  await ctx.answerCbQuery()
+  await ctx.editMessageText('🧩 Solving captcha and purchasing number...')
+
+  try {
+    const result = await buySingleNumber(session, pending, chatId)
+
+    delete pendingNumber[chatId]
+
+    const bought = session.numbers ? session.numbers.length : 0
+    const remaining = MAX_NUMBERS_PER_ACCOUNT - bought
+
+    if (remaining > 0) {
+      await ctx.editMessageText(
+        `✅ <b>Number purchased!</b>\n🇵🇱 <code>+48${result.number}</code>\n\n` +
+        `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
+        `💡 Get another number from the menu below.`,
+        { parse_mode: 'HTML', reply_markup: mainMenu() }
+      )
+    } else {
+      await ctx.editMessageText(
+        `✅ <b>Number purchased!</b>\n🇵🇱 <code>+48${result.number}</code>\n\n` +
+        `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased (limit reached)\n` +
+        `💡 Use Main Menu to create a new account for more numbers.`,
+        { parse_mode: 'HTML', reply_markup: mainMenu() }
+      )
+    }
+
+    await stopPolling(chatId)
+    await startPolling(chatId, session)
+
+    const monitorMsg = await ctx.reply(monitorMessageText(session), {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: stopKeyboard(chatId, 0) },
+    })
+    monitorMessages[chatId] = monitorMsg.message_id
+    await ctx.telegram.editMessageReplyMarkup(chatId, monitorMsg.message_id, undefined, {
+      inline_keyboard: stopKeyboard(chatId, monitorMsg.message_id),
+    }).catch(() => {})
+  } catch (e) {
+    log.error(`buy error: ${e.message}`, chatId)
+    await ctx.editMessageText('❌ Purchase failed: ' + e.message.substring(0, 100), { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+  }
+})
+
+bot.action('main', async (ctx) => {
+  await ctx.answerCbQuery()
+  await ctx.editMessageText('Choose an option:', mainMenu())
 })
 
 const args = process.argv.slice(2)
