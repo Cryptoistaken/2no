@@ -937,7 +937,7 @@ async function processGetNumber(ctx) {
 
     const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
     if (!avail.result || !avail.result.length) {
-      await ctx.reply('No numbers available. Try again later.', { reply_markup: mainMenu() })
+      await ctx.reply('No numbers available. Try again later.', { ...mainMenu() })
       return
     }
 
@@ -959,12 +959,12 @@ async function processGetNumber(ctx) {
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
       `Get This - purchase this number`,
-      { parse_mode: 'HTML', reply_markup: kb }
+      { parse_mode: 'HTML', ...kb }
     )
 
   } catch (e) {
     log.error(`get number error: ${e.message}`, chatId)
-    await ctx.reply('Error: ' + e.message.substring(0, 100), { reply_markup: mainMenu() })
+    await ctx.reply('Error: ' + e.message.substring(0, 100), { ...mainMenu() })
   } finally {
     delete processing[chatId]
   }
@@ -978,6 +978,13 @@ async function resumeSessions() {
   log.info(`resuming ${entries.length} saved session(s)`)
   for (const [chatId, s] of entries) {
     if (sessions[chatId]) continue
+    if (!s.numbers || !s.numbers.length) {
+      log.info(`skipping session ${chatId} with 0 numbers`, chatId)
+      delete data.savedSessions[chatId]
+      delete data.oldSessions[chatId]
+      saveData()
+      continue
+    }
     ;(async () => {
       let lastError
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -995,7 +1002,7 @@ async function resumeSessions() {
             delete data.savedSessions[chatId]
             delete data.oldSessions[chatId]
             saveData()
-            bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+            bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { ...mainMenu() }).catch(() => {})
             return
           }
           const session = { email: s.email, password: s.password, token, numbers: s.numbers, chatId }
@@ -1015,7 +1022,7 @@ async function resumeSessions() {
       delete data.savedSessions[chatId]
       delete data.oldSessions[chatId]
       saveData()
-      bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { reply_markup: mainMenu() }).catch(() => {})
+      bot.telegram.sendMessage(chatId, 'Number resume failed. Get new numbers to start.', { ...mainMenu() }).catch(() => {})
     })()
   }
 }
@@ -1309,7 +1316,7 @@ bot.action('refresh_number', async (ctx) => {
   const session = sessions[chatId]
   if (!session) {
     await ctx.answerCbQuery('Session expired')
-    return ctx.editMessageText('Session expired. Get a new number.', { reply_markup: mainMenu() })
+    return ctx.editMessageText('Session expired. Get a new number.', { ...mainMenu() })
   }
 
   await ctx.answerCbQuery()
@@ -1317,7 +1324,7 @@ bot.action('refresh_number', async (ctx) => {
   try {
     const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
     if (!avail.result || !avail.result.length) {
-      await ctx.editMessageText('No numbers available.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+      await ctx.editMessageText('No numbers available.', { ...Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
       return
     }
 
@@ -1339,7 +1346,7 @@ bot.action('refresh_number', async (ctx) => {
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
       `Get This - purchase this number`,
-      { parse_mode: 'HTML', reply_markup: kb }
+      { parse_mode: 'HTML', ...kb }
     )
   } catch (e) {
     log.error(`refresh error: ${e.message}`, chatId)
@@ -1354,13 +1361,13 @@ bot.action('confirm_buy', async (ctx) => {
 
   if (!session || !pending) {
     await ctx.answerCbQuery('Session expired')
-    await ctx.editMessageText('Session expired. Use Main Menu to start over.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    await ctx.editMessageText('Session expired. Use Main Menu to start over.', { ...Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
     return
   }
 
   if (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT) {
     await ctx.answerCbQuery('Account limit reached')
-    await ctx.editMessageText(`This account has reached the maximum of ${MAX_NUMBERS_PER_ACCOUNT} purchases.\nUse Main Menu to create a new account.`, { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    await ctx.editMessageText(`This account has reached the maximum of ${MAX_NUMBERS_PER_ACCOUNT} purchases.\nUse Main Menu to create a new account.`, { ...Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
     return
   }
 
@@ -1380,14 +1387,14 @@ bot.action('confirm_buy', async (ctx) => {
         `<b>Number purchased!</b>\n<code>+48${result.number}</code> 🇵🇱\n\n` +
         `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
         `Get another number from the menu below.`,
-        { parse_mode: 'HTML', reply_markup: mainMenu() }
+        { parse_mode: 'HTML', ...mainMenu() }
       )
     } else {
       await ctx.editMessageText(
         `<b>Number purchased!</b>\n<code>+48${result.number}</code> 🇵🇱\n\n` +
         `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned (limit reached)\n` +
         `Use Main Menu to create a new account for more numbers.`,
-        { parse_mode: 'HTML', reply_markup: mainMenu() }
+        { parse_mode: 'HTML', ...mainMenu() }
       )
     }
 
@@ -1404,7 +1411,7 @@ bot.action('confirm_buy', async (ctx) => {
     }).catch(() => {})
   } catch (e) {
     log.error(`buy error: ${e.message}`, chatId)
-    await ctx.editMessageText('Purchase failed: ' + e.message.substring(0, 100), { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    await ctx.editMessageText('Purchase failed: ' + e.message.substring(0, 100), { ...Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
   }
 })
 
