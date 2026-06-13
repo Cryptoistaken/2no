@@ -949,7 +949,7 @@ async function processGetNumber(ctx) {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('Get This', 'confirm_buy'),
+        Markup.button.callback('Use This', 'confirm_buy'),
         Markup.button.callback('Refresh', 'refresh_number'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
@@ -959,7 +959,7 @@ async function processGetNumber(ctx) {
       `<code>+48${num.number}</code> 🇵🇱\n\n` +
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
-      `Get This - purchase this number`,
+      `Use This - purchase this number`,
       { parse_mode: 'HTML', ...kb }
     )
 
@@ -1336,7 +1336,7 @@ bot.action('refresh_number', async (ctx) => {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('Get This', 'confirm_buy'),
+        Markup.button.callback('Use This', 'confirm_buy'),
         Markup.button.callback('Refresh', 'refresh_number'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
@@ -1346,7 +1346,7 @@ bot.action('refresh_number', async (ctx) => {
       `<code>+48${num.number}</code> 🇵🇱\n\n` +
       `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
       `Refresh - see another number\n` +
-      `Get This - purchase this number`,
+      `Use This - purchase this number`,
       { parse_mode: 'HTML', ...kb }
     )
   } catch (e) {
