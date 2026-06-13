@@ -1103,11 +1103,10 @@ bot.action(/stop_confirm_(\d+)_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery('Stopped monitoring')
   await stopPolling(chatId)
   if (sessions[chatId]) {
-    if (data.savedSessions[chatId]) {
-      data.oldSessions[chatId] = { ...data.savedSessions[chatId] }
-    }
     sessions[chatId].numbers = []
   }
+  delete data.savedSessions[chatId]
+  delete data.oldSessions[chatId]
   saveData()
   await editStoppedMessage(ctx, chatId, msgId)
   printState()
