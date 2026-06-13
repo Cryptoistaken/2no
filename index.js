@@ -795,7 +795,7 @@ function detectSender(body) {
 
 async function startPolling(chatId, session) {
   await stopPolling(chatId)
-  seenMessages[chatId] = new Set()
+  if (!seenMessages[chatId]) seenMessages[chatId] = new Set()
   pollingSessions[chatId] = true
 
   log.info(`started SMS polling for +48 ${session.numbers.map(n => n.number).join(', ')}`, chatId)
