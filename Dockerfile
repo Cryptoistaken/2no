@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y nodejs npm ca-certificates && rm -rf /v
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json ./
+RUN npm install
 
 COPY . ./
 
