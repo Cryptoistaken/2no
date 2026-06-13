@@ -909,7 +909,7 @@ async function processGetNumber(ctx) {
     let session = sessions[chatId]
 
     if (!session || (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT)) {
-      const msg = await ctx.reply('🔄 Setting up account...')
+      const msg = await ctx.reply('Setting up account...')
 
       if (session) {
         data.oldSessions[chatId] = { ...session }
@@ -917,7 +917,7 @@ async function processGetNumber(ctx) {
 
       const result = await registerOnly(chatId, (type, data) => {
         if (type === 'progress') {
-          ctx.telegram.editMessageText(chatId, msg.message_id, undefined, `🔄 ${data}`).catch(() => {})
+          ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
         }
       })
 
@@ -932,12 +932,12 @@ async function processGetNumber(ctx) {
       data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
       saveData()
 
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, '✅ Account ready!').catch(() => {})
+      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Account ready!').catch(() => {})
     }
 
     const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
     if (!avail.result || !avail.result.length) {
-      await ctx.reply('❌ No numbers available. Try again later.', { reply_markup: mainMenu() })
+      await ctx.reply('No numbers available. Try again later.', { reply_markup: mainMenu() })
       return
     }
 
@@ -948,23 +948,23 @@ async function processGetNumber(ctx) {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('🔄 Refresh', 'refresh_number'),
-        Markup.button.callback('✅ Get This', 'confirm_buy'),
+        Markup.button.callback('Refresh', 'refresh_number'),
+        Markup.button.callback('Get This', 'confirm_buy'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
     ])
 
     await ctx.reply(
-      `🇵🇱 <b>+48${num.number}</b>\n\n` +
-      `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
-      `🔄 Refresh — see another number\n` +
-      `✅ Get This — purchase this number`,
+      `<b>+48${num.number}</b> 🇵🇱\n\n` +
+      `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
+      `Refresh - see another number\n` +
+      `Get This - purchase this number`,
       { parse_mode: 'HTML', reply_markup: kb }
     )
 
   } catch (e) {
     log.error(`get number error: ${e.message}`, chatId)
-    await ctx.reply('❌ Error: ' + e.message.substring(0, 100), { reply_markup: mainMenu() })
+    await ctx.reply('Error: ' + e.message.substring(0, 100), { reply_markup: mainMenu() })
   } finally {
     delete processing[chatId]
   }
@@ -1317,7 +1317,7 @@ bot.action('refresh_number', async (ctx) => {
   try {
     const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
     if (!avail.result || !avail.result.length) {
-      await ctx.editMessageText('❌ No numbers available.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+      await ctx.editMessageText('No numbers available.', { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
       return
     }
 
@@ -1328,17 +1328,17 @@ bot.action('refresh_number', async (ctx) => {
 
     const kb = Markup.inlineKeyboard([
       [
-        Markup.button.callback('🔄 Refresh', 'refresh_number'),
-        Markup.button.callback('✅ Get This', 'confirm_buy'),
+        Markup.button.callback('Refresh', 'refresh_number'),
+        Markup.button.callback('Get This', 'confirm_buy'),
       ],
       [Markup.button.callback('« Main Menu', 'main')],
     ])
 
     await ctx.editMessageText(
-      `🇵🇱 <b>+48${num.number}</b>\n\n` +
-      `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
-      `🔄 Refresh — see another number\n` +
-      `✅ Get This — purchase this number`,
+      `<b>+48${num.number}</b> 🇵🇱\n\n` +
+      `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
+      `Refresh - see another number\n` +
+      `Get This - purchase this number`,
       { parse_mode: 'HTML', reply_markup: kb }
     )
   } catch (e) {
@@ -1360,12 +1360,12 @@ bot.action('confirm_buy', async (ctx) => {
 
   if (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT) {
     await ctx.answerCbQuery('Account limit reached')
-    await ctx.editMessageText(`❌ This account has reached the maximum of ${MAX_NUMBERS_PER_ACCOUNT} purchases.\nUse Main Menu to create a new account.`, { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    await ctx.editMessageText(`This account has reached the maximum of ${MAX_NUMBERS_PER_ACCOUNT} purchases.\nUse Main Menu to create a new account.`, { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
     return
   }
 
   await ctx.answerCbQuery()
-  await ctx.editMessageText('🧩 Solving captcha and purchasing number...')
+  await ctx.editMessageText('Solving captcha and purchasing number...')
 
   try {
     const result = await buySingleNumber(session, pending, chatId)
@@ -1377,16 +1377,16 @@ bot.action('confirm_buy', async (ctx) => {
 
     if (remaining > 0) {
       await ctx.editMessageText(
-        `✅ <b>Number purchased!</b>\n🇵🇱 <code>+48${result.number}</code>\n\n` +
-        `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased\n` +
-        `💡 Get another number from the menu below.`,
+        `<b>Number purchased!</b>\n<code>+48${result.number}</code> 🇵🇱\n\n` +
+        `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
+        `Get another number from the menu below.`,
         { parse_mode: 'HTML', reply_markup: mainMenu() }
       )
     } else {
       await ctx.editMessageText(
-        `✅ <b>Number purchased!</b>\n🇵🇱 <code>+48${result.number}</code>\n\n` +
-        `📊 Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} purchased (limit reached)\n` +
-        `💡 Use Main Menu to create a new account for more numbers.`,
+        `<b>Number purchased!</b>\n<code>+48${result.number}</code> 🇵🇱\n\n` +
+        `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned (limit reached)\n` +
+        `Use Main Menu to create a new account for more numbers.`,
         { parse_mode: 'HTML', reply_markup: mainMenu() }
       )
     }
@@ -1404,7 +1404,7 @@ bot.action('confirm_buy', async (ctx) => {
     }).catch(() => {})
   } catch (e) {
     log.error(`buy error: ${e.message}`, chatId)
-    await ctx.editMessageText('❌ Purchase failed: ' + e.message.substring(0, 100), { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
+    await ctx.editMessageText('Purchase failed: ' + e.message.substring(0, 100), { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Main Menu', 'main')]]) })
   }
 })
 
