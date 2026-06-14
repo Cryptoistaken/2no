@@ -673,7 +673,7 @@ async function buySingleNumber(session, numberInfo, chatId) {
   if (!st.numbers) st.numbers = []
   st.numbers.push({ number: numberInfo.number, number_id: numberInfo.number_id, purchasedAt: new Date().toISOString() })
 
-  data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+  data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId, pollingStartedAt: Date.now() }
   saveData()
 
   log.success(`number ${numberInfo.number} purchased`, chatId)
@@ -1010,7 +1010,7 @@ async function processGetNumber(ctx) {
         chatId,
       }
       sessions[chatId] = session
-      data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId }
+  data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId, pollingStartedAt: Date.now() }
       saveData()
 
       await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Account ready!').catch(() => {})
@@ -1070,9 +1070,16 @@ async function resumeSessions() {
       saveData()
       continue
     }
+    if (s.pollingStartedAt && Date.now() - s.pollingStartedAt > 7200000) {
+      log.info(`skipping session ${chatId} - polling window expired (2h since start)`, chatId)
+      delete data.savedSessions[chatId]
+      delete data.oldSessions[chatId]
+      saveData()
+      continue
+    }
     const oldest = s.numbers.reduce((min, n) => Math.min(min, n.purchasedAt ? new Date(n.purchasedAt).getTime() : Infinity), Infinity)
-    if (oldest && Date.now() - oldest > 86400000) {
-      log.info(`skipping session ${chatId} - numbers expired (older than 24h)`, chatId)
+    if (oldest && Date.now() - oldest > 3 * 24 * 60 * 60 * 1000) {
+      log.info(`skipping session ${chatId} - numbers expired (older than 3 days)`, chatId)
       delete data.savedSessions[chatId]
       delete data.oldSessions[chatId]
       saveData()
@@ -1241,9 +1248,9 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
     }
   }
   const oldest = session.numbers.reduce((min, n) => Math.min(min, n.created_at || Infinity), Infinity) * 1000
-  if (oldest && Date.now() - oldest > 86400000) {
+  if (oldest && Date.now() - oldest > 3 * 24 * 60 * 60 * 1000) {
     await ctx.telegram.editMessageText(chatId, msgId, undefined,
-      'Numbers expired (24h limit). Create new numbers.'
+      'Numbers expired (3 day limit). Create new numbers.'
     ).catch(() => {})
     return ctx.reply('Choose an option:', mainMenu())
   }
@@ -1252,7 +1259,10 @@ bot.action(/start_monitor_(\d+)_(\d+)/, async (ctx) => {
     const token = (loginRes && loginRes.token) || ''
     if (!token) throw new Error('login failed')
     session.token = token
+    session.pollingStartedAt = Date.now()
     sessions[chatId] = session
+    data.savedSessions[chatId] = { ...data.savedSessions[chatId], pollingStartedAt: session.pollingStartedAt }
+    saveData()
     await startPolling(chatId, session)
     monitorMessages[chatId] = msgId
     await editMonitorMessage(ctx, chatId, msgId, session)
