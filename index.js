@@ -43,20 +43,20 @@ const CF_WORKERS = 4
 const PYTHON_WORKER = `import sys, json, tls_client
 
 session = tls_client.Session(
-    client_identifier="chrome_120",
+    client_identifier="chrome_131",
     random_tls_extension_order=True
 )
 
 base_headers = {
     "accept": "application/json, text/plain, */*",
     "content-type": "application/json",
-    "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138"',
+    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
     "sec-gpc": "1",
     "referer": "https://2nd-no.com/",
     "origin": "https://2nd-no.com/",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 }
 
 for line in sys.stdin:
