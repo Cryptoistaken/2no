@@ -801,7 +801,7 @@ async function loginAndGetNumbers(session, count, chatId, onProgress) {
 async function stopPolling(chatId) {
   if (pollTimers[chatId]) {
     log.info('stopping SMS poll timer', chatId)
-    clearInterval(pollTimers[chatId])
+    clearTimeout(pollTimers[chatId])
     delete pollTimers[chatId]
   }
   delete pollingSessions[chatId]
@@ -859,8 +859,14 @@ async function startPolling(chatId, session) {
 
   log.info(`started SMS polling for +48 ${session.numbers.map(n => n.number).join(', ')}`, chatId)
 
+  const startTime = Date.now()
+  const FAST_INTERVAL = 1000
+  const SLOW_INTERVAL = 5000
+  const FAST_DURATION = 5 * 60 * 1000
   let pollCount = 0
-  pollTimers[chatId] = setInterval(async () => {
+
+  async function poll() {
+    if (!pollingSessions[chatId]) return
     pollCount++
     try {
       const msgs = await pollApi(session.token, {
@@ -870,7 +876,7 @@ async function startPolling(chatId, session) {
 
       if (msgs.error === 1003 && msgs.code === 401) {
         log.warning('token expired, attempting re-login', chatId)
-        if (reAuthLocks[chatId]) { return }
+        if (reAuthLocks[chatId]) { return scheduleNext() }
         reAuthLocks[chatId] = true
         try {
           const loginRes = await cfRequestProxied({ id: 101, query: { email: session.email, password: session.password } }, session.email)
@@ -884,7 +890,7 @@ async function startPolling(chatId, session) {
         } finally {
           delete reAuthLocks[chatId]
         }
-        return
+        return scheduleNext()
       }
 
       const numberIds = (session.numbers || []).map(n => n.number_id)
@@ -933,7 +939,20 @@ async function startPolling(chatId, session) {
     } catch (e) {
       log.error(`polling error: ${e.message}`, chatId)
     }
-  }, 1000)
+    scheduleNext()
+  }
+
+  function scheduleNext() {
+    if (!pollingSessions[chatId]) return
+    const elapsed = Date.now() - startTime
+    const interval = elapsed < FAST_DURATION ? FAST_INTERVAL : SLOW_INTERVAL
+    if (elapsed >= FAST_DURATION && elapsed - (interval === SLOW_INTERVAL ? SLOW_INTERVAL : FAST_INTERVAL) < FAST_DURATION) {
+      log.info('switched to slow polling (5s)', chatId)
+    }
+    pollTimers[chatId] = setTimeout(poll, interval)
+  }
+
+  scheduleNext()
   autoStopTimers[chatId] = setTimeout(() => {
     log.info('2-hour auto-stop triggered', chatId)
     stopPolling(chatId)
