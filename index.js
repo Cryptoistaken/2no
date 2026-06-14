@@ -989,59 +989,66 @@ async function processGetNumber(ctx) {
   try {
     let session = sessions[chatId]
 
-    if (!session || (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT)) {
-      const msg = await ctx.reply('Setting up account...')
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (!session || (session.numbers && session.numbers.length >= MAX_NUMBERS_PER_ACCOUNT)) {
+        const msg = await ctx.reply(attempt === 1 ? 'Setting up account...' : `No numbers, creating new account (attempt ${attempt}/3)...`)
 
-      if (session) {
-        data.oldSessions[chatId] = { ...session }
-      }
-
-      const result = await registerOnly(chatId, (type, data) => {
-        if (type === 'progress') {
-          ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
+        if (session) {
+          data.oldSessions[chatId] = { ...session }
         }
-      })
 
-      session = {
-        email: result.email,
-        password: DEFAULT_PASSWORD,
-        token: result.token,
-        numbers: [],
-        chatId,
+        const result = await registerOnly(chatId, (type, data) => {
+          if (type === 'progress') {
+            ctx.telegram.editMessageText(chatId, msg.message_id, undefined, data).catch(() => {})
+          }
+        })
+
+        session = {
+          email: result.email,
+          password: DEFAULT_PASSWORD,
+          token: result.token,
+          numbers: [],
+          chatId,
+        }
+        sessions[chatId] = session
+        data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId, pollingStartedAt: Date.now() }
+        saveData()
+
+        await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Account ready!').catch(() => {})
       }
-      sessions[chatId] = session
-  data.savedSessions[chatId] = { email: session.email, password: session.password, numbers: session.numbers, chatId, pollingStartedAt: Date.now() }
-      saveData()
 
-      await ctx.telegram.editMessageText(chatId, msg.message_id, undefined, 'Account ready!').catch(() => {})
+      const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
+      if (avail.result && avail.result.length) {
+        const num = avail.result[0]
+        pendingNumber[chatId] = { number: num.number, number_id: num.id }
+
+        const bought = session.numbers ? session.numbers.length : 0
+
+        const kb = Markup.inlineKeyboard([
+          [
+            Markup.button.callback('Use This', 'confirm_buy'),
+            Markup.button.callback('Refresh', 'refresh_number'),
+          ],
+          [Markup.button.callback('« Main Menu', 'main')],
+        ])
+
+        await ctx.reply(
+          `<code>+48${num.number}</code> 🇵🇱\n\n` +
+          `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
+          `Refresh - see another number\n` +
+          `Use This - purchase this number`,
+          { parse_mode: 'HTML', ...kb }
+        )
+        return
+      }
+
+      if (attempt < 3) {
+        session = null
+        await sleep(2000)
+      }
     }
 
-    const avail = await cfRequestAuth(session.token, { id: 310 }, session.email)
-    if (!avail.result || !avail.result.length) {
-      await ctx.reply('No numbers available. Try again later.', { ...mainMenu() })
-      return
-    }
-
-    const num = avail.result[0]
-    pendingNumber[chatId] = { number: num.number, number_id: num.id }
-
-    const bought = session.numbers ? session.numbers.length : 0
-
-    const kb = Markup.inlineKeyboard([
-      [
-        Markup.button.callback('Use This', 'confirm_buy'),
-        Markup.button.callback('Refresh', 'refresh_number'),
-      ],
-      [Markup.button.callback('« Main Menu', 'main')],
-    ])
-
-    await ctx.reply(
-      `<code>+48${num.number}</code> 🇵🇱\n\n` +
-      `Account: ${bought}/${MAX_NUMBERS_PER_ACCOUNT} numbers owned\n` +
-      `Refresh - see another number\n` +
-      `Use This - purchase this number`,
-      { parse_mode: 'HTML', ...kb }
-    )
+    await ctx.reply('No numbers available after 3 attempts. Try again later.', { ...mainMenu() })
 
   } catch (e) {
     log.error(`get number error: ${e.message}`, chatId)
