@@ -184,6 +184,19 @@ async function cleanupSeenMessages() {
 }
 
 setInterval(cleanupSeenMessages, SEEN_CLEANUP_INTERVAL)
+
+const sessions = {}
+const pollTimers = {}
+const pollingSessions = {}
+const seenMessages = {}
+const processing = {}
+const pendingNumber = {}
+const monitorMessages = {}
+const autoStopTimers = {}
+const reAuthLocks = {}
+const pendingProxy = {}
+const pendingImport = {}
+
 await loadSeenMessages()
 
 if (!data.users) data.users = {}
@@ -239,18 +252,6 @@ function printState() {
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
-
-const sessions = {}
-const pollTimers = {}
-const pollingSessions = {}
-const seenMessages = {}
-const processing = {}
-const pendingNumber = {}
-const monitorMessages = {}
-const autoStopTimers = {}
-const reAuthLocks = {}
-const pendingProxy = {}
-const pendingImport = {}
 
 // --- CfClient: Python TLS worker pool ---
 
@@ -1540,10 +1541,6 @@ if (genIdx !== -1) {
     process.exit(1)
   })
 } else {
-  const startupDelay = 15000
-  log.info(`waiting ${startupDelay / 1000}s for old instance to shutdown...`)
-  await new Promise(r => setTimeout(r, startupDelay))
-
   const webhookDomain = process.env.WEBHOOK_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN
   const port = parseInt(process.env.PORT || '3000', 10)
 
