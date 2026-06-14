@@ -1070,6 +1070,14 @@ async function resumeSessions() {
       saveData()
       continue
     }
+    const oldest = s.numbers.reduce((min, n) => Math.min(min, n.purchasedAt ? new Date(n.purchasedAt).getTime() : Infinity), Infinity)
+    if (oldest && Date.now() - oldest > 86400000) {
+      log.info(`skipping session ${chatId} - numbers expired (older than 24h)`, chatId)
+      delete data.savedSessions[chatId]
+      delete data.oldSessions[chatId]
+      saveData()
+      continue
+    }
     ;(async () => {
       let lastError
       for (let attempt = 1; attempt <= 3; attempt++) {
