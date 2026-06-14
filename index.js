@@ -100,6 +100,8 @@ const WORKER_SCRIPT = path.join(fs.mkdtempSync('2no-py-'), 'worker.py')
 fs.writeFileSync(WORKER_SCRIPT, PYTHON_WORKER)
 
 const REDIS_KEY = '2no:data'
+const SEEN_KEY = '2no:seen'
+const SEEN_CLEANUP_INTERVAL = 3 * 24 * 60 * 60 * 1000
 let redis = null
 let data = { proxy: null, users: {} }
 
@@ -126,6 +128,63 @@ async function loadData() {
   }
 }
 await loadData()
+
+async function loadSeenMessages() {
+  if (!redis) return
+  try {
+    const raw = await redis.get(SEEN_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      const cutoff = Date.now() - SEEN_CLEANUP_INTERVAL
+      for (const [chatId, msgs] of Object.entries(parsed)) {
+        seenMessages[chatId] = new Set()
+        for (const [key, ts] of Object.entries(msgs)) {
+          if (ts > cutoff) seenMessages[chatId].add(key)
+        }
+      }
+      log.info('seen messages loaded from redis')
+    }
+  } catch (e) {
+    log.warning(`seen messages load failed: ${e.message}`)
+  }
+}
+
+async function saveSeenMessages() {
+  if (!redis) return
+  try {
+    const obj = {}
+    const cutoff = Date.now() - SEEN_CLEANUP_INTERVAL
+    for (const [chatId, msgs] of Object.entries(seenMessages)) {
+      obj[chatId] = {}
+      for (const key of msgs) {
+        obj[chatId][key] = Date.now()
+      }
+    }
+    await redis.set(SEEN_KEY, JSON.stringify(obj))
+  } catch {}
+}
+
+async function cleanupSeenMessages() {
+  if (!redis) return
+  try {
+    const raw = await redis.get(SEEN_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    const cutoff = Date.now() - SEEN_CLEANUP_INTERVAL
+    let cleaned = 0
+    for (const chatId of Object.keys(parsed)) {
+      for (const [key, ts] of Object.entries(parsed[chatId])) {
+        if (ts < cutoff) { delete parsed[chatId][key]; cleaned++ }
+      }
+      if (Object.keys(parsed[chatId]).length === 0) delete parsed[chatId]
+    }
+    await redis.set(SEEN_KEY, JSON.stringify(parsed))
+    if (cleaned > 0) log.info(`cleaned ${cleaned} old seen messages`)
+  } catch {}
+}
+
+setInterval(cleanupSeenMessages, SEEN_CLEANUP_INTERVAL)
+await loadSeenMessages()
 
 if (!data.users) data.users = {}
 if (!data.proxy) data.proxy = null
@@ -548,7 +607,7 @@ async function registerOnly(chatId, onProgress) {
       while (Date.now() < deadline) {
         const inbox = await fetch(`${KILOMAIL_API}/inbox/${encodeURIComponent(email)}`).then(r => r.ok ? r.json() : [])
         if (Array.isArray(inbox) && inbox.length) { msg = inbox[0]; break }
-        await sleep(2000)
+        await sleep(1000)
       }
       if (!msg) { if (onProgress) onProgress('progress', 'Verification email timeout, retrying...'); continue }
       if (onProgress) onProgress('progress', 'Verification email received')
@@ -806,7 +865,7 @@ async function startPolling(chatId, session) {
     try {
       const msgs = await pollApi(session.token, {
         id: 414,
-        query: { offset: 0, limit: 10, order_by: [{ field: 'created_at', order: 'DESC' }] },
+        query: { offset: 0, limit: 50, order_by: [{ field: 'created_at', order: 'DESC' }] },
       })
 
       if (msgs.error === 1003 && msgs.code === 401) {
@@ -840,6 +899,7 @@ async function startPolling(chatId, session) {
         const key = m.id || (m.body ? m.body.slice(0, 100) : '')
         if (seenMessages[chatId] && seenMessages[chatId].has(key)) continue
         seenMessages[chatId].add(key)
+        saveSeenMessages()
 
         const body = m.body || m.text || 'empty'
         const sender = m.from_number || m.from || detectSender(body)
@@ -873,7 +933,7 @@ async function startPolling(chatId, session) {
     } catch (e) {
       log.error(`polling error: ${e.message}`, chatId)
     }
-  }, 5000)
+  }, 1000)
   autoStopTimers[chatId] = setTimeout(() => {
     log.info('2-hour auto-stop triggered', chatId)
     stopPolling(chatId)
@@ -882,7 +942,7 @@ async function startPolling(chatId, session) {
       editStoppedMessage(bot, chatId, msgId)
     }
     printState()
-  }, 7200000)
+  }, 1800000)
 }
 
 function getUserDefaultNumbers(chatId) {
@@ -1464,8 +1524,27 @@ if (genIdx !== -1) {
   const startupDelay = 15000
   log.info(`waiting ${startupDelay / 1000}s for old instance to shutdown...`)
   await new Promise(r => setTimeout(r, startupDelay))
-  bot.launch()
-  log.success('bot started')
+
+  const webhookDomain = process.env.WEBHOOK_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN
+  const port = parseInt(process.env.PORT || '3000', 10)
+
+  if (webhookDomain) {
+    bot.launch({
+      webhook: {
+        domain: webhookDomain,
+        port,
+      },
+    })
+    log.success(`bot started in webhook mode`)
+    log.info(`webhook domain: ${webhookDomain}`)
+    log.info(`listening on port: ${port}`)
+    log.info(`webhook URL: https://${webhookDomain}${bot.secretPathComponent()}`)
+  } else {
+    bot.launch()
+    log.success('bot started in long-polling mode')
+    log.info('set RAILWAY_PUBLIC_DOMAIN or WEBHOOK_DOMAIN to enable webhook mode')
+  }
+
   printState()
   resumeSessions()
 }
@@ -1473,7 +1552,7 @@ if (genIdx !== -1) {
 process.on('SIGINT', async () => {
   for (const id of Object.keys(pollingSessions)) await stopPolling(id)
   cfClient.close()
-  if (redis) { saveData(); await redis.quit() }
+  if (redis) { saveData(); saveSeenMessages(); await redis.quit() }
   fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   bot.stop('SIGINT')
   process.exit(0)
@@ -1481,7 +1560,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   for (const id of Object.keys(pollingSessions)) await stopPolling(id)
   cfClient.close()
-  if (redis) { saveData(); await redis.quit() }
+  if (redis) { saveData(); saveSeenMessages(); await redis.quit() }
   fs.rmSync(path.dirname(WORKER_SCRIPT), { recursive: true, force: true })
   bot.stop('SIGTERM')
   process.exit(0)
